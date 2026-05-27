@@ -1,0 +1,63 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   AXIS · inst/assets/axis.css
+   Overrides on top of the bslib theme. Keep this thin — prefer bs_add_rules()
+   in R/theme.R for token-level changes.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* Ensure the app uses the AXIS background everywhere */
+body {
+  background-color: #f7f7f5 !important;
+}
+
+/* Navbar logo word-mark */
+.navbar-brand {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* Active nav tab underline accent */
+.navbar .nav-link.active {
+  border-bottom: 2px solid #1f3a5f;
+  color: #1f3a5f !important;
+}
+
+/* Card soft shadow */
+.card {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06) !important;
+}
+
+/* KPI mono numbers */
+.axis-kpi-tile .kpi-value {
+  font-family: "IBM Plex Mono", monospace;
+  font-feature-settings: "tnum";
+}
+
+/* Scrollable detail rail */
+.axis-detail-rail {
+  overflow-y: auto;
+  max-height: calc(100vh - 120px);
+}
+
+/* Audit log left border timeline */
+.axis-audit-entry {
+  border-left: 3px solid #e8e6e0;
+  padding-left: 12px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.axis-audit-entry.link-created  { border-left-color: #15803d; }
+.axis-audit-entry.field-edited  { border-left-color: #0891b2; }
+.axis-audit-entry.link-broken   { border-left-color: #b91c1c; }
+
+/* MDRO badge chips */
+.axis-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #fff;
+  line-height: 1.6;
+}

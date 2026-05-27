@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AXIS · _brand.yml
+# Brand tokens for bslib. These mirror R/theme.R and serve as documentation.
+# See: https://posit-dev.github.io/brand-yml/
+# ─────────────────────────────────────────────────────────────────────────────
+meta:
+  name: AXIS
+  version: "0.4"
+
+color:
+  palette:
+    navy:   "#1f3a5f"
+    gold:   "#d4a017"
+    slate:  "#f7f7f5"
+    ink:    "#1a1d24"
+    green:  "#15803d"
+    amber:  "#b45309"
+    red:    "#b91c1c"
+  background: "#f7f7f5"
+  foreground: "#1a1d24"
+  primary:    "#1f3a5f"
+  secondary:  "#d4a017"
+  success:    "#15803d"
+  warning:    "#b45309"
+  danger:     "#b91c1c"
+
+typography:
+  base:
+    family: "IBM Plex Sans"
+    weight: 400
+  headings:
+    family: "IBM Plex Serif"
+    weight: 600
+  monospace:
+    family: "IBM Plex Mono"
+    weight: 400
