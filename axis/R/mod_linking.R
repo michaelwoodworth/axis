@@ -61,6 +61,8 @@
        src_o = "participant_id",          textarea = FALSE, mono = TRUE),
   list(id = "cp_title",      label = "Collection protocol",  src_v = "cp_hint",
        src_o = "cp_short_title",          textarea = FALSE, mono = FALSE),
+  list(id = "parent_specimen_type", label = "Parent specimen type", src_v = NULL,
+       src_o = "custom_parent_specimen_type", textarea = FALSE, mono = FALSE),
   list(id = "ast_notes",     label = "Antibiogram notes",    src_v = NULL,
        src_o = NULL,                       textarea = TRUE,  mono = FALSE)
 )
@@ -91,11 +93,17 @@ linkingUI <- function(id) {
                          background:#e5e7eb; color:#374151; font-weight:600; }
     .lk-tab.active .badge { background:#1f3a5f; color:#fff; }
     .lk-chips          { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
-    .lk-chip           { display:inline-flex; align-items:center; gap:4px;
-                         padding:3px 10px; border-radius:16px; font-size:12px;
+    .lk-chip           { display:inline-grid; grid-template-columns:auto minmax(72px, auto);
+                         align-items:center; gap:4px;
+                         padding:3px 7px 3px 10px; border-radius:16px; font-size:12px;
                          border:1px solid #d1d5db; background:#fff; cursor:pointer;
                          font-weight:500; color:#374151; white-space:nowrap; }
     .lk-chip.active    { border-color:#1f3a5f; background:#eef2f8; color:#1f3a5f; }
+    .lk-chip .form-group,
+    .lk-chip .shiny-input-container { margin:0 !important; }
+    .lk-chip select     { border:none; background:transparent; color:#1f3a5f;
+                         font-size:12px; font-weight:600; padding:0 16px 0 0;
+                         min-height:20px; height:20px; box-shadow:none; }
     .lk-body           { display:flex; flex:1; overflow:hidden; min-height:0; }
     .lk-table-pane     { flex:1; overflow:auto; padding:16px; }
     .lk-rail           { width:360px; min-width:320px; max-width:400px;
@@ -194,10 +202,7 @@ linkingUI <- function(id) {
         # Filter chips
         shiny::div(
           class = "lk-chips",
-          .lk_chip(ns("chip_study"),    "Study",    "All"),
-          .lk_chip(ns("chip_mdro"),     "MDRO",     "All"),
-          .lk_chip(ns("chip_method"),   "Method",   "All"),
-          .lk_chip(ns("chip_state"),    "State",    "All")
+          shiny::uiOutput(ns("filter_chips"))
         ),
 
         # Edit mode toggle
@@ -265,7 +270,9 @@ linkingServer <- function(id, app_state) {
       sp  <- app_state$specimens
       ov  <- app_state$cleaned_overrides
 
-      if (is.null(lc) || nrow(lc) == 0) return(staged_links_display(app_state))
+      if (is.null(lc) || nrow(lc) == 0) {
+        return(.augment_link_filters(staged_links_display(app_state), app_state))
+      }
 
       # Count overrides per link_id
       ov_counts <- if (!is.null(ov) && nrow(ov) > 0) {
@@ -288,7 +295,22 @@ linkingServer <- function(id, app_state) {
           n_edits     = tidyr::replace_na(n_edits, 0L),
           conf_pct    = round(confidence * 100),
           disputed    = lab_id %in% disagree_ids
-        )
+        ) |>
+        .augment_link_filters(app_state)
+    })
+
+    output$filter_chips <- shiny::renderUI({
+      d <- links_data()
+      choices_for <- function(col) {
+        vals <- if (nrow(d) > 0 && col %in% names(d)) sort(unique(stats::na.omit(d[[col]]))) else character()
+        c("All", vals)
+      }
+      shiny::tagList(
+        .lk_select_chip(ns("f_study"), "Study", choices_for("study_filter")),
+        .lk_select_chip(ns("f_mdro"), "MDRO", choices_for("mdro_filter")),
+        .lk_select_chip(ns("f_method"), "Method", choices_for("method_filter")),
+        .lk_select_chip(ns("f_state"), "State", choices_for("state_filter"))
+      )
     })
 
     # Tab-filtered view
@@ -296,12 +318,23 @@ linkingServer <- function(id, app_state) {
       d <- links_data()
       if (nrow(d) == 0) return(d)
 
-      switch(rv$active_tab,
+      d <- switch(rv$active_tab,
         all      = d,
         review   = dplyr::filter(d, conf_pct < 80),
         edited   = dplyr::filter(d, n_edits  > 0),
         disputed = dplyr::filter(d, disputed)
       )
+
+      if (!is.null(input$f_study_select) && input$f_study_select != "All")
+        d <- dplyr::filter(d, study_filter == input$f_study_select)
+      if (!is.null(input$f_mdro_select) && input$f_mdro_select != "All")
+        d <- dplyr::filter(d, mdro_filter == input$f_mdro_select)
+      if (!is.null(input$f_method_select) && input$f_method_select != "All")
+        d <- dplyr::filter(d, method_filter == input$f_method_select)
+      if (!is.null(input$f_state_select) && input$f_state_select != "All")
+        d <- dplyr::filter(d, state_filter == input$f_state_select)
+
+      d
     })
 
     # ── Tab count badges ──────────────────────────────────────────────────────
@@ -448,6 +481,8 @@ linkingServer <- function(id, app_state) {
       conn    <- app_state$db_conn
       who     <- "analyst"
       now_ts  <- lubridate::now()
+      current_vals <- .current_cleaned_values(lid, links_data(), app_state$cleaned_overrides,
+                                              app_state$vitek_unique, app_state$specimens)
 
       # Build cleaned_overrides rows
       overrides <- purrr::map_dfr(names(edits), function(fid) {
@@ -467,9 +502,9 @@ linkingServer <- function(id, app_state) {
         tibble::tibble(
           event_id   = uuid::UUIDgenerate(),
           link_id    = lid,
-          event_type = "field_edit",
+          event_type = "field.edited",
           field      = fid,
-          from_value = NA_character_,
+          from_value = as.character(current_vals[[fid]] %||% ""),
           to_value   = as.character(edits[[fid]]),
           who        = who,
           when_ts    = now_ts
@@ -646,7 +681,8 @@ linkingServer <- function(id, app_state) {
               status  <- .reconcile_status(v_val, o_val, c_saved)
               dot_col <- .status_color(status)
 
-              c_display <- if (!is.null(c_pend)) c_pend else c_saved
+              c_default <- .default_cleaned_value(v_val, o_val, c_saved)
+              c_display <- if (!is.null(c_pend)) c_pend else c_default
 
               mono_style <- if (fld$mono) "font-family:'IBM Plex Mono',monospace;font-size:11px;" else ""
 
@@ -791,6 +827,31 @@ linkingServer <- function(id, app_state) {
       conn <- app_state$db_conn
       if (is.null(conn)) return()
 
+      if (is.null(app_state$links_confirmed)) {
+        app_state$links_confirmed <- tryCatch(
+          read_table(conn, "links_confirmed"),
+          error = function(e) tibble::tibble()
+        )
+      }
+      if (is.null(app_state$vitek_raw)) {
+        app_state$vitek_raw <- tryCatch(
+          read_table(conn, "vitek_raw"),
+          error = function(e) tibble::tibble()
+        )
+      }
+      if (is.null(app_state$vitek_unique) &&
+          !is.null(app_state$vitek_raw) && nrow(app_state$vitek_raw) > 0) {
+        app_state$vitek_unique <- tryCatch(
+          dedup_vitek(app_state$vitek_raw, "latest"),
+          error = function(e) tibble::tibble()
+        )
+      }
+      if (is.null(app_state$specimens)) {
+        app_state$specimens <- tryCatch(
+          read_table(conn, "specimens"),
+          error = function(e) tibble::tibble()
+        )
+      }
       if (is.null(app_state$cleaned_overrides)) {
         app_state$cleaned_overrides <- tryCatch(
           read_table(conn, "cleaned_overrides"),
@@ -809,14 +870,119 @@ linkingServer <- function(id, app_state) {
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-#' Filter chip HTML element.
-.lk_chip <- function(id, label, default = "All") {
+#' Filter chip select control.
+.lk_select_chip <- function(id, label, choices) {
   shiny::div(
     class = "lk-chip",
     id    = id,
     shiny::tags$small(paste0(label, ": ")),
-    default
+    shiny::selectInput(
+      inputId = paste0(id, "_select"),
+      label = NULL,
+      choices = choices,
+      selected = "All",
+      width = "100%"
+    )
   )
+}
+
+.norm_filter_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[is.na(x) | x == "" | x == "NA"] <- "Unspecified"
+  x
+}
+
+.augment_link_filters <- function(d, app_state) {
+  if (is.null(d) || nrow(d) == 0) return(d)
+
+  vu <- app_state$vitek_unique
+  sp <- app_state$specimens
+
+  if (!is.null(vu) && nrow(vu) > 0) {
+    d <- d |>
+      dplyr::left_join(
+        vu |>
+          dplyr::select(
+            lab_id, isolate_number,
+            v_mdro_filter = dplyr::any_of("parsed_target")
+          ) |>
+          dplyr::distinct(),
+        by = c("lab_id", "isolate_number")
+      )
+  } else {
+    d$v_mdro_filter <- NA_character_
+  }
+
+  if (!is.null(sp) && nrow(sp) > 0) {
+    d <- d |>
+      dplyr::left_join(
+        sp |>
+          dplyr::select(
+            os_identifier,
+            o_mdro_filter = dplyr::any_of("custom_mdro")
+          ) |>
+          dplyr::distinct(),
+        by = "os_identifier"
+      )
+  } else {
+    d$o_mdro_filter <- NA_character_
+  }
+
+  d |>
+    dplyr::mutate(
+      mdro_filter = .norm_filter_value(dplyr::coalesce(
+        dplyr::na_if(as.character(.data$v_mdro_filter), ""),
+        dplyr::na_if(as.character(.data$o_mdro_filter), "")
+      )),
+      study_filter = .norm_filter_value(.data$cp_short_title),
+      method_filter = .norm_filter_value(.data$match_method),
+      state_filter = .norm_filter_value(.data$state)
+    ) |>
+    dplyr::select(-dplyr::any_of(c("v_mdro_filter", "o_mdro_filter")))
+}
+
+.default_cleaned_value <- function(v_val, o_val, saved_val = "") {
+  saved_val <- saved_val %||% ""
+  if (!is.na(saved_val) && saved_val != "") return(saved_val)
+  if (!is.na(v_val) && v_val != "") return(v_val)
+  if (!is.na(o_val) && o_val != "") return(o_val)
+  ""
+}
+
+.current_cleaned_values <- function(link_id, links_data, overrides, vitek, specimens) {
+  vals <- list()
+  if (is.null(links_data) || nrow(links_data) == 0) return(vals)
+  link_row <- links_data[links_data$link_id == link_id, ]
+  if (nrow(link_row) == 0) return(vals)
+
+  vitek_row <- if (!is.null(vitek) && nrow(vitek) > 0) {
+    vitek[vitek$lab_id == link_row$lab_id[1] &
+            vitek$isolate_number == link_row$isolate_number[1], ]
+  } else tibble::tibble()
+
+  spec_row <- if (!is.null(specimens) && nrow(specimens) > 0) {
+    specimens[specimens$os_identifier == link_row$os_identifier[1], ]
+  } else tibble::tibble()
+
+  saved_vals <- list()
+  if (!is.null(overrides) && nrow(overrides) > 0) {
+    saved <- overrides |>
+      dplyr::filter(link_id == !!link_id) |>
+      dplyr::arrange(dplyr::desc(edited_at)) |>
+      dplyr::distinct(field, .keep_all = TRUE)
+    if (nrow(saved) > 0) {
+      for (i in seq_len(nrow(saved))) saved_vals[[saved$field[i]]] <- saved$cleaned_value[i]
+    }
+  }
+
+  for (fld in .RECONCILE_FIELDS) {
+    vals[[fld$id]] <- .default_cleaned_value(
+      .get_field_value(vitek_row, fld$src_v),
+      .get_field_value(spec_row, fld$src_o),
+      saved_vals[[fld$id]] %||% ""
+    )
+  }
+  vals
 }
 
 #' Empty-state for the detail rail.
