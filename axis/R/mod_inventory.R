@@ -434,9 +434,13 @@ inventoryServer <- function(id, app_state) {
 
       d_flow <- d |>
         dplyr::mutate(
-          flow_site = inv_site_label,
-          flow_study = dplyr::coalesce(v_parsed_study, clean_cp_title, project_id),
-          flow_parent = clean_parent_specimen_type,
+          flow_site = display_flow_site(inv_site_label, project_id, cp_short_title),
+          flow_study = purrr::pmap_chr(
+            list(clean_participant_id, v_parsed_subject, lab_id,
+                 v_parsed_study, clean_cp_title, cp_short_title, project_id),
+            display_flow_study
+          ),
+          flow_parent = display_flow_parent(clean_parent_specimen_type),
           flow_mdro = normalize_flow_mdro(
             clean_mdro_category,
             os_mdro = o_custom_mdro,
@@ -488,7 +492,11 @@ inventoryServer <- function(id, app_state) {
       strip_prefix_js <- htmlwidgets::JS(
         "function(params) {",
         "  var name = params.name || '';",
-        "  return name.replace(/^(site:|study:|parent:|mdro:|species:)/, '');",
+        "  var label = name.replace(/^(site:|study:|parent:|mdro:|species:)/, '');",
+        "  if (params.value !== undefined && params.value !== null) {",
+        "    return label + '\\n' + params.value;",
+        "  }",
+        "  return label;",
         "}"
       )
       tooltip_js <- htmlwidgets::JS(
@@ -524,6 +532,26 @@ inventoryServer <- function(id, app_state) {
         function(link) {
           link$value <- as.numeric(link$value)
           link
+        }
+      )
+      node_values <- dplyr::full_join(
+        edges |>
+          dplyr::group_by(name = source) |>
+          dplyr::summarise(out_value = sum(value), .groups = "drop"),
+        edges |>
+          dplyr::group_by(name = target) |>
+          dplyr::summarise(in_value = sum(value), .groups = "drop"),
+        by = "name"
+      ) |>
+        dplyr::mutate(value = pmax(
+          tidyr::replace_na(out_value, 0L),
+          tidyr::replace_na(in_value, 0L)
+        ))
+      chart$x$opts$series[[1]]$data <- purrr::map(
+        chart$x$opts$series[[1]]$data,
+        function(node) {
+          node$value <- node_values$value[match(node$name, node_values$name)]
+          node
         }
       )
       chart
@@ -704,6 +732,64 @@ site_prefix_from_id <- function(id) {
   if (first %in% c("EM", "AG", "ML", "SP")) return(first)
 
   NA_character_
+}
+
+display_flow_site <- function(site_label, project_id = NULL, cp_short_title = NULL) {
+  n <- length(site_label)
+  if (is.null(project_id)) project_id <- rep(NA_character_, n)
+  if (is.null(cp_short_title)) cp_short_title <- rep(NA_character_, n)
+
+  raw <- dplyr::coalesce(
+    dplyr::na_if(trimws(as.character(site_label)), ""),
+    dplyr::na_if(trimws(as.character(project_id)), ""),
+    dplyr::na_if(trimws(as.character(cp_short_title)), "")
+  )
+  upper <- toupper(raw)
+
+  out <- raw
+  out[!is.na(upper) & grepl("^FAIR(_OUTPUT)?$|^FAIR\\b|FAIR618", upper)] <- "FAIR"
+  out[!is.na(upper) & grepl("EMORY LONG TERM|LONG TERM ACUTE|ELTAC", upper)] <- "ELTAC"
+  out[!is.na(upper) & grepl("A\\.?G\\.? RHODES|AG RHODES|A G RHODES", upper)] <- "A.G. Rhodes"
+  out <- sub("_output$", "", out, ignore.case = TRUE)
+  out
+}
+
+display_flow_study <- function(participant_id, parsed_subject, lab_id,
+                               parsed_study, clean_cp_title,
+                               cp_short_title, project_id) {
+  ids <- toupper(trimws(as.character(c(participant_id, parsed_subject, lab_id))))
+  ids <- ids[!is.na(ids) & ids != ""]
+  text <- toupper(paste(na.omit(c(parsed_study, clean_cp_title,
+                                  cp_short_title, project_id)), collapse = " "))
+
+  if (grepl("FAIR618|\\bFAIR\\b|FAIR_OUTPUT", text)) return("FAIR")
+
+  if (length(ids) > 0) {
+    if (any(grepl("^R(EM|AG|ML|SP)", ids))) return("REACT")
+    if (any(grepl("^[A-QS-Z](EM|AG|ML|SP)", ids))) return("APPS")
+    if (any(grepl("^APPS", ids))) return("APPS")
+    if (any(grepl("^SNT", ids))) return("Sentinel REACT")
+  }
+
+  if (grepl("\\bAPPS\\b", text)) return("APPS")
+  if (grepl("\\bSNT\\b|SENTINEL", text)) return("Sentinel REACT")
+  if (grepl("\\bREACT\\b", text)) return("REACT")
+
+  fallback <- dplyr::coalesce(
+    dplyr::na_if(trimws(as.character(parsed_study)), ""),
+    dplyr::na_if(trimws(as.character(clean_cp_title)), ""),
+    dplyr::na_if(trimws(as.character(cp_short_title)), ""),
+    dplyr::na_if(trimws(as.character(project_id)), ""),
+    "Study unspecified"
+  )
+  sub("_output$", "", fallback, ignore.case = TRUE)
+}
+
+display_flow_parent <- function(parent_type) {
+  x <- trimws(as.character(parent_type))
+  x[x %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
+  x[!is.na(x) & toupper(x) == "CRYOPRESERVED CELLS"] <- "Isolates"
+  x
 }
 
 normalize_flow_mdro <- function(x, os_mdro = NULL, disagree = NULL) {
