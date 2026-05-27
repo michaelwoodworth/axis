@@ -503,20 +503,32 @@ inventoryServer <- function(id, app_state) {
         "}"
       )
 
-      edges |>
+      chart <- edges |>
         echarts4r::e_charts() |>
         echarts4r::e_sankey(
           source, target, value,
+          layout      = "horizontal",
           nodeWidth   = 12,
           nodePadding = 10,
           layoutIterations = 64,
           emphasis    = list(focus = "adjacency"),
           label       = list(fontSize = 11, color = "#374151", formatter = strip_prefix_js),
           itemStyle   = list(borderWidth = 0),
-          lineStyle   = list(color = "gradient", opacity = 0.45, curveness = 0.5)
+          lineStyle   = list(color = "source", opacity = 0.68, curveness = 0.55)
         ) |>
         echarts4r::e_tooltip(trigger = "item", formatter = tooltip_js) |>
         echarts4r::e_grid(top = 10, bottom = 10, left = 20, right = 20)
+
+      # echarts4r builds Sankey links via apply(), which coerces value to
+      # character. ECharts needs numeric values for visible ribbon widths.
+      chart$x$opts$series[[1]]$links <- purrr::map(
+        chart$x$opts$series[[1]]$links,
+        function(link) {
+          link$value <- as.numeric(link$value)
+          link
+        }
+      )
+      chart
     })
 
     # ── Sites map ─────────────────────────────────────────────────────────────
