@@ -14,8 +14,7 @@ outputs/
 *.duckdb
 *.duckdb.wal
 
-# Existing prototype artifacts are intentionally not part of the initial scaffold.
-axis/
+# Existing app code is versioned; data/export artifacts remain local only.
 HANDOFF.md
 
 # R package/test artifacts.
