@@ -1,0 +1,23 @@
+.DS_Store
+.Rhistory
+.RData
+.Rproj.user/
+.Renviron
+.env
+
+# Local data and generated outputs. AXIS fixtures must stay under tests/fixtures.
+01.data/
+99.logos/
+axis/data/
+data/
+outputs/
+*.duckdb
+*.duckdb.wal
+
+# Existing app code is versioned; data/export artifacts remain local only.
+HANDOFF.md
+
+# R package/test artifacts.
+.Rcheck/
+*.tar.gz
+testthat.Rout*
