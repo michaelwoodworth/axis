@@ -989,7 +989,8 @@ ingestionServer <- function(id, app_state) {
                  paste0(round(score), "%"))
           })
       } else list()
-      ui_bucket_col("Matched", length(rows),
+      n_matched <- if (!is.null(b) && !is.null(b$matched)) nrow(b$matched) else 0L
+      ui_bucket_col("Matched", n_matched,
                     "will commit on confirm",
                     .AX$ok, .AX$okSoft, rows, FALSE)
     })
