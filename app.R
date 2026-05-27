@@ -132,6 +132,17 @@ ui <- bslib::page_navbar(
         var el = document.getElementById(msg.id);
         if (el) el.className = msg.cls;
       });
+      Shiny.addCustomMessageHandler('axis_select_nav', function(msg) {
+        var value = msg.value || '';
+        var selector = 'a.nav-link[data-value=\"' + CSS.escape(value) + '\"]';
+        var el = document.querySelector(selector);
+        if (!el) return;
+        if (window.bootstrap && bootstrap.Tab) {
+          bootstrap.Tab.getOrCreateInstance(el).show();
+        } else {
+          el.click();
+        }
+      });
     ")),
     # IBM Plex fonts (fallback — bslib already loads via font_google() in theme)
     tags$link(

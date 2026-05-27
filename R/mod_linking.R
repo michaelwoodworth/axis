@@ -104,6 +104,10 @@ linkingUI <- function(id) {
     .lk-chip select     { border:none; background:transparent; color:#1f3a5f;
                          font-size:12px; font-weight:600; padding:0 16px 0 0;
                          min-height:20px; height:20px; box-shadow:none; }
+    .lk-commit-btn      { padding:6px 12px; border-radius:7px; border:1px solid #1f3a5f;
+                         background:#1f3a5f; color:#fff; font-size:12px;
+                         font-weight:600; white-space:nowrap; }
+    .lk-commit-btn:hover { background:#162d4a; color:#fff; border-color:#162d4a; }
     .lk-body           { display:flex; flex:1; overflow:hidden; min-height:0; }
     .lk-table-pane     { flex:1; overflow:auto; padding:16px; }
     .lk-rail           { width:360px; min-width:320px; max-width:400px;
@@ -206,7 +210,9 @@ linkingUI <- function(id) {
         ),
 
         # Edit mode toggle
-        bslib::input_switch(ns("edit_mode"), "Edit mode", value = FALSE)
+        bslib::input_switch(ns("edit_mode"), "Edit mode", value = FALSE),
+        shiny::actionButton(ns("commit_matched"), "Commit matched only (0)",
+                            class = "lk-commit-btn")
       ),
 
       # ── Body: DT left + detail rail right ───────────────────────────────────
@@ -358,6 +364,73 @@ linkingServer <- function(id, app_state) {
         list(id = "lk-badge-edited",   text = as.character(n_edited)))
       session$sendCustomMessage("axis_update_badge",
         list(id = "lk-badge-disputed", text = as.character(n_disputed)))
+    })
+
+    shiny::observe({
+      buckets <- app_state$match_buckets
+      n_m <- if (!is.null(buckets) && !is.null(buckets$matched)) {
+        nrow(buckets$matched)
+      } else {
+        0L
+      }
+      shiny::updateActionButton(
+        session,
+        "commit_matched",
+        label = sprintf("Commit matched only (%d)", n_m)
+      )
+    })
+
+    # Commit from the Linking tab using the same persistence path as Ingestion.
+    shiny::observeEvent(input$commit_matched, {
+      tryCatch({
+        buckets <- app_state$match_buckets
+        matched <- if (!is.null(buckets)) buckets$matched else NULL
+        if (is.null(matched) || nrow(matched) == 0) {
+          shiny::showNotification(
+            "No staged auto-matched records to commit. Run automerge in Ingestion first.",
+            type = "warning"
+          )
+          return()
+        }
+
+        result <- commit_matched_links(
+          conn              = app_state$db_conn,
+          matched           = matched,
+          batch_id          = app_state$batch_id,
+          vitek_raw         = app_state$vitek_raw,
+          vitek_ast         = app_state$vitek_ast,
+          vitek_unique      = app_state$vitek_unique,
+          specimens         = app_state$specimens,
+          cleaned_overrides = app_state$cleaned_overrides,
+          formats           = c("csv", "xlsx", "duckdb")
+        )
+
+        app_state$links_confirmed   <- result$links_confirmed
+        app_state$cleaned_overrides <- result$cleaned_overrides
+        app_state$cleaned_links     <- result$cleaned_links
+        app_state$cleaned_ast       <- result$cleaned_ast
+        rv$selected_id <- NULL
+
+        shiny::showNotification(
+          sprintf(
+            "%d link%s committed to AXIS_clean_%s from Linking. Exported %d cleaned rows and %d AST rows.",
+            result$n_committed,
+            if (result$n_committed == 1L) "" else "s",
+            app_state$batch_id,
+            result$export_info$n_cleaned,
+            result$export_info$n_ast
+          ),
+          type = "message",
+          duration = 6
+        )
+      }, error = function(e) {
+        shiny::showNotification(
+          paste("Commit failed:", e$message),
+          type = "error",
+          duration = 10
+        )
+        warning("AXIS linking commit_matched failed: ", e$message)
+      })
     })
 
     # ── DT table ──────────────────────────────────────────────────────────────
