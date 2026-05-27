@@ -2,10 +2,9 @@
   <img src="docs/assets/axis_logo_v1.png" alt="AXIS logo" width="900">
 </p>
 
-# AXIS
-Shiny app to link OpenSpecimen inventories with Vitek2 data
 
 SOP: *Install, Clone, and Run the AXIS Shiny App*
+Shiny app to link OpenSpecimen inventories with Vitek2 data
 
 ## Purpose
 
