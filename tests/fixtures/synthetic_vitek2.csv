@@ -1,0 +1,5 @@
+isolate_id,specimen_accession_id,species,specimen_type,study,site,collection_date,test_date,antibiotic,interpretation,mdro_hint
+SYN-ISO-001,SYN-SPEC-001,Escherichia coli,Rectal swab,FAIR,Site Alpha,2026-01-05,2026-01-06,Ceftriaxone,R,ESBL
+SYN-ISO-002,SYN-SPEC-002,Klebsiella pneumoniae,Urine,REACT,Site Beta,2026-01-07,2026-01-08,Meropenem,R,CRE
+SYN-ISO-003,SYN-SPEC-003,Enterococcus faecium,Blood,SNT,Site Gamma,2026-01-09,2026-01-10,Vancomycin,R,VRE
+SYN-ISO-004,SYN-SPEC-999,Pseudomonas aeruginosa,Sputum,FAIR,Site Alpha,2026-01-11,2026-01-12,Cefepime,S,

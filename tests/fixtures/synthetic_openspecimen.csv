@@ -1,0 +1,5 @@
+specimen_id,specimen_label,species,specimen_type,study,site,collection_date,inventory_status,quantity,unit,mdro_hint
+SYN-OS-001,SYN-SPEC-001,Escherichia coli,Cryopreserved Cells,FAIR,Site Alpha,2026-01-05,Available,1,vial,ESBL
+SYN-OS-002,SYN-SPEC-002,Klebsiella pneumoniae,Cryopreserved Cells,REACT,Site Beta,2026-01-07,Available,2,vial,CRE
+SYN-OS-003,SYN-SPEC-003,Enterococcus faecium,Cryopreserved Cells,SNT,Site Gamma,2026-01-09,Reserved,1,vial,VRE
+SYN-OS-004,SYN-SPEC-004,Staphylococcus aureus,Cryopreserved Cells,FAIR,Site Alpha,2026-01-13,Available,1,vial,MRSA
