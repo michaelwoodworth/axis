@@ -100,6 +100,20 @@ inventoryUI <- function(id) {
     .inv-empty          { display:flex; align-items:center; justify-content:center;
                           height:200px; color:#9ca3af; font-size:13px;
                           font-style:italic; }
+    #axis-busy-overlay  { position:fixed; inset:0; z-index:10000;
+                          display:flex; align-items:center; justify-content:center;
+                          background:rgba(247,247,245,.72); backdrop-filter:blur(2px); }
+    .axis-busy-card     { width:min(360px, calc(100vw - 48px)); background:#fff;
+                          border:1px solid #e8e6e0; border-radius:10px;
+                          box-shadow:0 18px 45px rgba(31,58,95,.18);
+                          padding:22px; text-align:center; }
+    .axis-busy-spinner  { width:34px; height:34px; margin:0 auto 12px;
+                          border:3px solid #dbe4ef; border-top-color:#1f3a5f;
+                          border-radius:50%; animation:axis-spin .8s linear infinite; }
+    .axis-busy-title    { color:#1f3a5f; font-size:14px; font-weight:700;
+                          margin-bottom:5px; }
+    .axis-busy-text     { color:#6b7280; font-size:12px; line-height:1.45; }
+    @keyframes axis-spin { to { transform:rotate(360deg); } }
   "
 
   shiny::tagList(
@@ -219,6 +233,7 @@ inventoryServer <- function(id, app_state) {
             tibble::tibble()
           }
         )
+        from_db <- select_inventory_batch(from_db, app_state$batch_id)
         from_db <- prepare_inventory_cleaned(from_db)
         if (nrow(from_db) > 0) return(add_inventory_mdro_fields(from_db, inventory_cleaned_ast()))
       }
@@ -253,7 +268,7 @@ inventoryServer <- function(id, app_state) {
       if (is.null(conn)) return(tibble::tibble())
 
       tryCatch(
-        read_table(conn, "cleaned_ast"),
+        select_inventory_batch(read_table(conn, "cleaned_ast"), app_state$batch_id),
         error = function(e) {
           warning("read cleaned_ast for inventory failed: ", e$message)
           tibble::tibble()
@@ -269,7 +284,7 @@ inventoryServer <- function(id, app_state) {
       if (is.null(conn)) return(tibble::tibble())
 
       tryCatch(
-        read_table(conn, "specimens"),
+        select_inventory_batch(read_table(conn, "specimens"), app_state$batch_id),
         error = function(e) {
           warning("read specimens for inventory failed: ", e$message)
           tibble::tibble()
@@ -733,6 +748,29 @@ prepare_inventory_cleaned <- function(d) {
     )
 }
 
+select_inventory_batch <- function(d, batch_id = NULL) {
+  if (is.null(d) || nrow(d) == 0 || !"batch_id" %in% names(d)) {
+    return(d)
+  }
+
+  d <- tibble::as_tibble(d)
+  batches <- dplyr::na_if(trimws(as.character(d$batch_id)), "")
+  requested <- if (!is.null(batch_id) && length(batch_id) > 0) {
+    dplyr::na_if(trimws(as.character(batch_id[[1]])), "")
+  } else {
+    NA_character_
+  }
+
+  if (!is.na(requested) && requested %in% batches) {
+    return(d[batches == requested, , drop = FALSE])
+  }
+
+  available <- sort(unique(stats::na.omit(batches)))
+  if (length(available) == 0) return(d)
+
+  d[batches == available[[length(available)]], , drop = FALSE]
+}
+
 add_inventory_mdro_fields <- function(d, cleaned_ast = NULL) {
   if (is.null(d) || nrow(d) == 0) return(d)
 
@@ -764,7 +802,7 @@ normalize_flow_columns <- function(d) {
   d |>
     dplyr::mutate(
       flow_site = dplyr::na_if(trimws(as.character(flow_site)), ""),
-      flow_study = dplyr::na_if(trimws(as.character(flow_study)), ""),
+      flow_study = canonical_flow_study(flow_study),
       flow_parent = dplyr::coalesce(
         dplyr::na_if(trimws(as.character(flow_parent)), ""),
         "Parent specimen unspecified"
@@ -778,6 +816,19 @@ normalize_flow_columns <- function(d) {
         "Species unspecified"
       )
     )
+}
+
+canonical_flow_study <- function(study) {
+  raw <- trimws(as.character(study))
+  raw[raw %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
+  upper <- toupper(raw)
+  upper_compact <- gsub("[^A-Z0-9]+", "", upper)
+
+  out <- sub("_output$", "", raw, ignore.case = TRUE)
+  out[!is.na(upper) & grepl("FAIR618|\\bFAIR\\b|FAIR_OUTPUT", upper)] <- "FAIR"
+  out[!is.na(upper_compact) & grepl("^ARRRRG(V?2|20)?", upper_compact)] <- "ARRRRG"
+  out[!is.na(upper) & grepl("\\bARG\\b", upper)] <- "ARRRRG"
+  out
 }
 
 flow_empty <- function() {
@@ -964,9 +1015,11 @@ display_flow_study <- function(participant_id, parsed_subject, lab_id,
   text <- toupper(paste(na.omit(c(parsed_study, clean_cp_title,
                                   cp_short_title, project_id)), collapse = " "))
 
-  if (grepl("FAIR618|\\bFAIR\\b|FAIR_OUTPUT", text)) return("FAIR")
+  text_study <- canonical_flow_study(text)
+  if (!is.na(text_study) && text_study %in% c("FAIR", "ARRRRG")) return(text_study)
 
   if (length(ids) > 0) {
+    if (any(grepl("^ARG\\d{3}", ids))) return("ARRRRG")
     if (any(grepl("^R(EM|AG|ML|SP)", ids))) return("REACT")
     if (any(grepl("^[A-QS-Z](EM|AG|ML|SP)", ids))) return("APPS")
     if (any(grepl("^APPS", ids))) return("APPS")
@@ -984,7 +1037,7 @@ display_flow_study <- function(participant_id, parsed_subject, lab_id,
     dplyr::na_if(trimws(as.character(project_id)), ""),
     "Study unspecified"
   )
-  sub("_output$", "", fallback, ignore.case = TRUE)
+  canonical_flow_study(fallback)
 }
 
 display_flow_parent <- function(parent_type) {

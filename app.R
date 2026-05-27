@@ -143,6 +143,33 @@ ui <- bslib::page_navbar(
           el.click();
         }
       });
+      function axisBusyOverlay(text) {
+        var existing = document.getElementById('axis-busy-overlay');
+        if (existing) existing.remove();
+        var overlay = document.createElement('div');
+        overlay.id = 'axis-busy-overlay';
+        overlay.innerHTML =
+          '<div class=\"axis-busy-card\">' +
+            '<div class=\"axis-busy-spinner\"></div>' +
+            '<div class=\"axis-busy-title\">Preparing cleaned inventory</div>' +
+            '<div class=\"axis-busy-text\">' + (text || 'Writing matched links and refreshing DuckDB exports...') + '</div>' +
+          '</div>';
+        document.body.appendChild(overlay);
+      }
+      Shiny.addCustomMessageHandler('axis_busy_show', function(msg) {
+        axisBusyOverlay(msg && msg.text);
+      });
+      Shiny.addCustomMessageHandler('axis_busy_hide', function(msg) {
+        var overlay = document.getElementById('axis-busy-overlay');
+        if (overlay) overlay.remove();
+      });
+      document.addEventListener('click', function(ev) {
+        var btn = ev.target && ev.target.closest ? ev.target.closest('button') : null;
+        if (!btn) return;
+        if (btn.id === 'ingestion-commit_matched' || btn.id === 'linking-commit_matched') {
+          axisBusyOverlay('Committing matched rows, rebuilding cleaned tables, and refreshing inventory panels.');
+        }
+      }, true);
     ")),
     # IBM Plex fonts (fallback — bslib already loads via font_google() in theme)
     tags$link(
