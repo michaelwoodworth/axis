@@ -476,7 +476,11 @@ inventoryServer <- function(id, app_state) {
     # ── Sankey: site → study → parent specimen → MDRO → species ─────────────
     output$chart_sankey <- echarts4r::renderEcharts4r({
       d <- filtered()
-      os_only_flow <- os_enterococcus_flow_rows(inventory_specimens(), input)
+      os_only_flow <- if (nrow(d) > 0) {
+        os_enterococcus_flow_rows(inventory_specimens(), input)
+      } else {
+        flow_empty()
+      }
 
       if (nrow(d) == 0 && nrow(os_only_flow) == 0) {
         return(echarts4r::e_charts() |>
@@ -596,6 +600,7 @@ inventoryServer <- function(id, app_state) {
     })
 
     output$sankey_footnote <- shiny::renderText({
+      if (nrow(filtered()) == 0) return("")
       os_only_n <- nrow(os_enterococcus_flow_rows(inventory_specimens(), input))
       if (os_only_n == 0) return("")
       sprintf(
@@ -756,15 +761,19 @@ normalize_flow_columns <- function(d) {
     )
 }
 
+flow_empty <- function() {
+  tibble::tibble(
+    flow_site = character(),
+    flow_study = character(),
+    flow_parent = character(),
+    flow_mdro = character(),
+    flow_species = character()
+  )
+}
+
 os_enterococcus_flow_rows <- function(specimens, input = NULL) {
   if (is.null(specimens) || nrow(specimens) == 0) {
-    return(tibble::tibble(
-      flow_site = character(),
-      flow_study = character(),
-      flow_parent = character(),
-      flow_mdro = character(),
-      flow_species = character()
-    ))
+    return(flow_empty())
   }
 
   d <- tibble::as_tibble(specimens)
