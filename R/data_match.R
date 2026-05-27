@@ -69,7 +69,23 @@
   "PSEUDOMONAS AERUGINOSA" = "Pseudomonas aeruginosa",
   "K.PNEUMONIAE" = "Klebsiella pneumoniae",
   "K.PNEUM.PNEUMONIAE" = "Klebsiella pneumoniae",
-  "KLEBSIELLA PNEUMONIAE" = "Klebsiella pneumoniae"
+  "KLEBSIELLA PNEUMONIAE" = "Klebsiella pneumoniae",
+  "PROV.STUARTII" = "Providencia stuartii",
+  "PROVIDENCIA STUARTII" = "Providencia stuartii",
+  "CITRO.FREUNDII" = "Citrobacter freundii",
+  "CITROBACTER FREUNDII" = "Citrobacter freundii",
+  "CITRO.BRAAKII" = "Citrobacter braakii",
+  "CITROBACTER BRAAKII" = "Citrobacter braakii",
+  "K.AEROGENES" = "Enterobacter aerogenes",
+  "KLEBSIELLA AEROGENES" = "Enterobacter aerogenes",
+  "ENTEROBACTER AEROGENES" = "Enterobacter aerogenes",
+  "MORG.MORGANII" = "Morganella morganii",
+  "MORGANELLA MORGANII" = "Morganella morganii",
+  "K.OXYTOCA" = "Klebsiella oxytoca",
+  "KLEBSIELLA OXYTOCA" = "Klebsiella oxytoca",
+  "STENO.MALTOPHILIA" = "Stenotrophomonas maltophilia",
+  "STENOTROPHOMONAS MALTOPHILIA" = "Stenotrophomonas maltophilia",
+  "ENT.CLOACAE" = "Enterobacter cloacae_complex"
 )
 
 .norm_organism <- function(x) {
