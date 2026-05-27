@@ -269,7 +269,20 @@ ingestionUI <- function(id) {
               class = "ing-merge-note",
               "Parse Vitek2 and OpenSpecimen files first, then run candidate linkage."
             ),
-            uiOutput(ns("merge_ready_status"))
+            uiOutput(ns("merge_ready_status")),
+            tags$div(
+              style = "width:100%; margin-top:8px; text-align:left;",
+              tags$div(
+                style = sprintf(
+                  "font-size:10px; color:%s; font-weight:600;
+                   letter-spacing:0.5px; text-transform:uppercase;
+                   margin-bottom:4px;",
+                  .AX$muted
+                ),
+                "Cleaned CSV path"
+              ),
+              uiOutput(ns("cleaned_csv_path_control"))
+            )
           )
         ),
 
@@ -518,6 +531,16 @@ ingestionServer <- function(id, app_state) {
       rv$available_projects$project_id
     })
 
+    default_cleaned_csv_path <- function(batch_id = rv$batch_id) {
+      slug <- gsub("[^A-Za-z0-9_-]+", "_", batch_id %||% "B")
+      file.path("data", "exports", paste0("AXIS_clean_", slug, "_links.csv"))
+    }
+
+    cleaned_csv_path <- reactive({
+      path <- trimws(input$cleaned_csv_path %||% "")
+      if (nzchar(path)) path else default_cleaned_csv_path()
+    })
+
     merge_ready <- reactive({
       n_v <- if (!is.null(rv$vitek_unique)) nrow(rv$vitek_unique) else 0L
       n_s <- if (!is.null(rv$specimens)) nrow(rv$specimens) else 0L
@@ -614,6 +637,7 @@ ingestionServer <- function(id, app_state) {
           cleaned_ast = cleaned_ast,
           batch_id    = rv$batch_id,
           output_dir  = file.path("data", "exports"),
+          csv_path    = cleaned_csv_path(),
           formats     = c("csv", "xlsx", "duckdb"),
           conn        = rv$db_conn
         )
@@ -759,6 +783,16 @@ ingestionServer <- function(id, app_state) {
       )
     })
 
+    output$cleaned_csv_path_control <- renderUI({
+      textInput(
+        ns("cleaned_csv_path"),
+        label = NULL,
+        value = default_cleaned_csv_path(),
+        placeholder = "data/exports/AXIS_clean_B-YYYYMMDDHHMM_links.csv",
+        width = "100%"
+      )
+    })
+
     # ── Match preview ──────────────────────────────────────────────────────
     output$match_preview_subtitle <- renderUI({
       n_v <- if (!is.null(rv$vitek_unique)) nrow(rv$vitek_unique) else 0
@@ -865,17 +899,10 @@ ingestionServer <- function(id, app_state) {
 
     # ── Footer ─────────────────────────────────────────────────────────────
     output$footer_status <- renderUI({
-      b   <- rv$buckets
-      n_m <- if (!is.null(b) && !is.null(b$matched)) nrow(b$matched) else 0L
-      n_r <- if (!is.null(b) && !is.null(b$review))
-        dplyr::n_distinct(b$review$lab_id) else 0L
-      n_n <- if (!is.null(b) && !is.null(b$none)) nrow(b$none) else 0L
-      bid <- rv$batch_id %||% "…"
-
       tags$span(
         style = sprintf("font-size:12.5px; color:%s;", .AX$muted),
-        "Writes cleaned dataset ",
-        tags$code(paste0("AXIS_clean_", bid),
+        "Writes cleaned CSV to ",
+        tags$code(cleaned_csv_path(),
                   style = sprintf("color:%s; font-size:12px;", .AX$ink)),
         " · source CSVs untouched · audit trail preserved"
       )

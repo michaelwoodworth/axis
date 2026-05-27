@@ -230,14 +230,24 @@ build_cleaned_ast <- function(cleaned, vitek_ast) {
 #' @param cleaned_ast Linked AST tibble from build_cleaned_ast().
 #' @param batch_id Batch id used in output names.
 #' @param output_dir Directory for CSV/XLSX outputs.
+#' @param csv_path Optional explicit path for the cleaned links CSV. When
+#'   supplied, the AST CSV is written beside it using an "_ast.csv" suffix.
 #' @param formats Any of "csv", "xlsx", "duckdb".
 #' @param conn Optional DBI connection for "duckdb" exports.
 #' @return Named list containing output paths and row counts.
 export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
                                    output_dir = file.path("data", "exports"),
+                                   csv_path = NULL,
                                    formats = c("csv", "xlsx", "duckdb"),
                                    conn = NULL) {
   formats <- unique(tolower(formats))
+  if (!is.null(csv_path) && nzchar(trimws(csv_path))) {
+    csv_path <- trimws(csv_path)
+    if (!grepl("\\.csv$", csv_path, ignore.case = TRUE)) {
+      csv_path <- paste0(csv_path, ".csv")
+    }
+    output_dir <- dirname(csv_path)
+  }
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
   slug <- gsub("[^A-Za-z0-9_-]+", "_", batch_id)
@@ -251,8 +261,12 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
   )
 
   if ("csv" %in% formats) {
-    cleaned_path <- paste0(base, "_links.csv")
-    ast_path <- paste0(base, "_ast.csv")
+    cleaned_path <- if (!is.null(csv_path) && nzchar(csv_path)) {
+      csv_path
+    } else {
+      paste0(base, "_links.csv")
+    }
+    ast_path <- sub("\\.csv$", "_ast.csv", cleaned_path, ignore.case = TRUE)
     readr::write_csv(.exportable_df(cleaned), cleaned_path, na = "")
     readr::write_csv(.exportable_df(cleaned_ast), ast_path, na = "")
     outputs$csv <- c(cleaned_links = cleaned_path, cleaned_ast = ast_path)
