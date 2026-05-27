@@ -677,7 +677,7 @@ ingestionServer <- function(id, app_state) {
         )
 
         cleaned_links <- build_cleaned(
-          links     = links,
+          links     = app_state$links_confirmed,
           overrides = app_state$cleaned_overrides,
           vitek     = rv$vitek_unique,
           specimens = rv$specimens

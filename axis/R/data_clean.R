@@ -44,6 +44,21 @@ build_cleaned <- function(links, overrides, vitek, specimens) {
     return(cleaned_empty())
   }
 
+  links <- dedup_confirmed_links(links)
+  if (nrow(links) == 0) return(cleaned_empty())
+
+  vitek <- vitek |>
+    dplyr::mutate(.axis_row_order = dplyr::row_number()) |>
+    dplyr::arrange(dplyr::desc(.axis_row_order)) |>
+    dplyr::distinct(lab_id, isolate_number, .keep_all = TRUE) |>
+    dplyr::select(-.axis_row_order)
+
+  specimens <- specimens |>
+    dplyr::mutate(.axis_row_order = dplyr::row_number()) |>
+    dplyr::arrange(dplyr::desc(.axis_row_order)) |>
+    dplyr::distinct(os_identifier, .keep_all = TRUE) |>
+    dplyr::select(-.axis_row_order)
+
   # ── Step 1: links × vitek ─────────────────────────────────────────────────
   joined <- links |>
     dplyr::left_join(
@@ -171,6 +186,49 @@ build_cleaned <- function(links, overrides, vitek, specimens) {
     dplyr::arrange(project_id, lab_id, isolate_number)
 }
 
+#' Collapse repeated confirmed-link rows to one current logical link.
+#'
+#' Repeated "commit matched only" actions can create new link_id values for the
+#' same Vitek isolate/OpenSpecimen pairing. This helper keeps the most recent
+#' row for display/export counts without deleting historical database rows.
+dedup_confirmed_links <- function(links) {
+  if (is.null(links) || nrow(links) == 0) return(links)
+
+  required <- c("lab_id", "isolate_number", "os_identifier")
+  if (length(setdiff(required, names(links))) > 0) return(links)
+
+  created_at <- if ("created_at" %in% names(links)) {
+    suppressWarnings(as.POSIXct(links$created_at, tz = "UTC"))
+  } else {
+    as.POSIXct(rep(NA_character_, nrow(links)), tz = "UTC")
+  }
+
+  .clean_logical_link_key(links) |>
+    dplyr::mutate(
+      .axis_created_at = created_at,
+      .axis_row_order = dplyr::row_number()
+    ) |>
+    dplyr::arrange(
+      dplyr::desc(.axis_created_at),
+      dplyr::desc(.axis_row_order)
+    ) |>
+    dplyr::distinct(
+      .axis_lab_key, .axis_isolate_key, .axis_os_key,
+      .keep_all = TRUE
+    ) |>
+    dplyr::arrange(dplyr::across(dplyr::any_of(c("project_id", "lab_id", "isolate_number")))) |>
+    dplyr::select(-dplyr::starts_with(".axis_"))
+}
+
+.clean_logical_link_key <- function(df) {
+  df |>
+    dplyr::mutate(
+      .axis_lab_key = toupper(trimws(as.character(.data$lab_id))),
+      .axis_isolate_key = toupper(trimws(as.character(.data$isolate_number))),
+      .axis_os_key = toupper(trimws(as.character(.data$os_identifier)))
+    )
+}
+
 #' Build linked AST rows for the cleaned export.
 #'
 #' @param cleaned Cleaned link-level tibble from build_cleaned().
@@ -202,6 +260,10 @@ build_cleaned_ast <- function(cleaned, vitek_ast) {
         dplyr::na_if(as.character(.data$call_expert), ""),
         dplyr::na_if(as.character(.data$result_expertized), "")
       )
+    ) |>
+    dplyr::distinct(
+      lab_id, isolate_number, drug_code, drug_name, mic, call_instr, call_expert,
+      .keep_all = TRUE
     )
 
   cleaned |>

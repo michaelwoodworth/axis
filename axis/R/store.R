@@ -172,7 +172,7 @@ init_db_schema <- function(conn) {
   invisible(conn)
 }
 
-#' Write matched links to links_confirmed (append, skip duplicates by link_id).
+#' Write matched links to links_confirmed (append, skip duplicate logical links).
 #'
 #' @param conn   DBI connection from open_db().
 #' @param links  tibble matching links_confirmed schema (HANDOFF.md §4).
@@ -187,12 +187,27 @@ write_links <- function(conn, links) {
     )
   }
 
-  # Skip rows whose link_id already exists
-  existing_ids <- tryCatch(
-    DBI::dbGetQuery(conn, "SELECT link_id FROM links_confirmed")[["link_id"]],
-    error = function(e) character(0)
+  # Skip rows whose logical link has already been confirmed. link_id is generated
+  # per commit, so it cannot by itself prevent repeated commits of the same link.
+  existing <- tryCatch(
+    DBI::dbGetQuery(conn, "
+      SELECT link_id, lab_id, isolate_number, os_identifier
+      FROM links_confirmed
+    "),
+    error = function(e) tibble::tibble()
   )
-  new_links <- links |> dplyr::filter(!link_id %in% existing_ids)
+  new_links <- links
+  if (nrow(existing) > 0) {
+    existing_keys <- .add_logical_link_key(existing) |>
+      dplyr::select(.axis_lab_key, .axis_isolate_key, .axis_os_key)
+
+    new_links <- .add_logical_link_key(new_links) |>
+      dplyr::anti_join(
+        existing_keys,
+        by = c(".axis_lab_key", ".axis_isolate_key", ".axis_os_key")
+      ) |>
+      dplyr::select(-dplyr::starts_with(".axis_"))
+  }
 
   if (nrow(new_links) == 0) return(invisible(0L))
 
@@ -331,6 +346,15 @@ build_links_from_matches <- function(matched_tbl, batch_id, created_by = "analys
   if ("batch_id" %in% names(df)) df$batch_id <- batch_id
   else df <- dplyr::mutate(df, batch_id = batch_id, .before = 1)
   df
+}
+
+.add_logical_link_key <- function(df) {
+  df |>
+    dplyr::mutate(
+      .axis_lab_key = toupper(trimws(as.character(.data$lab_id))),
+      .axis_isolate_key = toupper(trimws(as.character(.data$isolate_number))),
+      .axis_os_key = toupper(trimws(as.character(.data$os_identifier)))
+    )
 }
 
 .stringify_list_cols <- function(df) {

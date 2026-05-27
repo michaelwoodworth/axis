@@ -273,6 +273,7 @@ linkingServer <- function(id, app_state) {
       if (is.null(lc) || nrow(lc) == 0) {
         return(.augment_link_filters(staged_links_display(app_state), app_state))
       }
+      lc <- dedup_confirmed_links(lc)
 
       # Count overrides per link_id
       ov_counts <- if (!is.null(ov) && nrow(ov) > 0) {
@@ -283,18 +284,22 @@ linkingServer <- function(id, app_state) {
         tibble::tibble(link_id = character(), n_edits = integer())
       }
 
-      # mdro_disagree flag from match_candidates (best effort)
+      # Field disagreement flags from the exact committed candidate. Confidence
+      # measures linkage strength; disputed means an important reconciled field
+      # differs for that chosen Vitek/OpenSpecimen pair.
       mc <- app_state$match_candidates
-      disagree_ids <- if (!is.null(mc) && nrow(mc) > 0 && "mdro_disagree" %in% names(mc)) {
-        mc |> dplyr::filter(mdro_disagree) |> dplyr::pull(lab_id) |> unique()
-      } else character(0)
+      disagree_flags <- .link_disagreement_flags(mc)
 
       lc |>
         dplyr::left_join(ov_counts, by = "link_id") |>
+        dplyr::left_join(
+          disagree_flags,
+          by = c("lab_id", "isolate_number", "os_identifier")
+        ) |>
         dplyr::mutate(
           n_edits     = tidyr::replace_na(n_edits, 0L),
           conf_pct    = round(confidence * 100),
-          disputed    = lab_id %in% disagree_ids
+          disputed    = tidyr::replace_na(disputed, FALSE)
         ) |>
         .augment_link_filters(app_state)
     })
@@ -1113,6 +1118,33 @@ staged_links_display <- function(app_state) {
       n_edits = 0L,
       link_id,
       conf_pct = round(confidence * 100),
-      disputed = dplyr::coalesce(mdro_disagree, FALSE)
+      disputed = dplyr::coalesce(mdro_disagree, FALSE) |
+        dplyr::coalesce(organism_disagree, FALSE)
     )
+}
+
+.link_disagreement_flags <- function(match_candidates) {
+  if (is.null(match_candidates) || nrow(match_candidates) == 0) {
+    return(tibble::tibble(
+      lab_id = character(),
+      isolate_number = character(),
+      os_identifier = character(),
+      disputed = logical()
+    ))
+  }
+
+  if (!"mdro_disagree" %in% names(match_candidates)) {
+    match_candidates$mdro_disagree <- FALSE
+  }
+  if (!"organism_disagree" %in% names(match_candidates)) {
+    match_candidates$organism_disagree <- FALSE
+  }
+
+  match_candidates |>
+    dplyr::mutate(
+      disputed = dplyr::coalesce(.data$mdro_disagree, FALSE) |
+        dplyr::coalesce(.data$organism_disagree, FALSE)
+    ) |>
+    dplyr::group_by(lab_id, isolate_number, os_identifier) |>
+    dplyr::summarise(disputed = any(disputed), .groups = "drop")
 }
