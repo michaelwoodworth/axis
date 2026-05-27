@@ -85,7 +85,6 @@ inventoryUI <- function(id) {
                           font-family:'IBM Plex Mono',monospace; line-height:1.1; }
     .inv-kpi-sub        { font-size:11px; color:#9ca3af; }
     .inv-kpi-spark      { height:32px; margin-top:4px; }
-    .inv-bottom-row     { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
     .inv-card           { background:#fff; border:1px solid #e8e6e0; border-radius:10px;
                           padding:18px; box-shadow:0 1px 3px rgba(0,0,0,.05); }
     .inv-card-title     { font-size:12px; font-weight:700; text-transform:uppercase;
@@ -160,19 +159,18 @@ inventoryUI <- function(id) {
         echarts4r::echarts4rOutput(ns("chart_accrual"), height = "260px")
       ),
 
-      # ── Bottom row: Sankey + Map ────────────────────────────────────────────
+      # ── Specimen flow ───────────────────────────────────────────────────────
       shiny::div(
-        class = "inv-bottom-row",
-        shiny::div(
-          class = "inv-card",
-          shiny::div(class = "inv-card-title", "Specimen flow: Site → Study → Parent specimen → MDRO → Species"),
-          echarts4r::echarts4rOutput(ns("chart_sankey"), height = "280px")
-        ),
-        shiny::div(
-          class = "inv-card",
-          shiny::div(class = "inv-card-title", "Sites map"),
-          leaflet::leafletOutput(ns("map_sites"), height = "280px")
-        )
+        class = "inv-card",
+        shiny::div(class = "inv-card-title", "Specimen flow: Site → Study → Parent specimen → MDRO → Species"),
+        echarts4r::echarts4rOutput(ns("chart_sankey"), height = "360px")
+      ),
+
+      # ── Sites map ───────────────────────────────────────────────────────────
+      shiny::div(
+        class = "inv-card",
+        shiny::div(class = "inv-card-title", "Sites map"),
+        leaflet::leafletOutput(ns("map_sites"), height = "360px")
       )
     )
   )
