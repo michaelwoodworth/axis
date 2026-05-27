@@ -89,6 +89,8 @@ inventoryUI <- function(id) {
                           padding:18px; box-shadow:0 1px 3px rgba(0,0,0,.05); }
     .inv-card-title     { font-size:12px; font-weight:700; text-transform:uppercase;
                           letter-spacing:.6px; color:#6b7280; margin-bottom:12px; }
+    .inv-footnote       { font-size:11px; color:#6b7280; line-height:1.35;
+                          margin-top:10px; max-width:920px; }
     .inv-empty          { display:flex; align-items:center; justify-content:center;
                           height:200px; color:#9ca3af; font-size:13px;
                           font-style:italic; }
@@ -163,7 +165,11 @@ inventoryUI <- function(id) {
       shiny::div(
         class = "inv-card",
         shiny::div(class = "inv-card-title", "Specimen flow: Site → Study → Parent specimen → MDRO → Species"),
-        echarts4r::echarts4rOutput(ns("chart_sankey"), height = "360px")
+        echarts4r::echarts4rOutput(ns("chart_sankey"), height = "360px"),
+        shiny::div(
+          class = "inv-footnote",
+          shiny::textOutput(ns("sankey_footnote"), inline = TRUE)
+        )
       ),
 
       # ── Sites map ───────────────────────────────────────────────────────────
@@ -185,7 +191,20 @@ inventoryServer <- function(id, app_state) {
     # ── Build cleaned dataset ─────────────────────────────────────────────────
     cleaned_data <- shiny::reactive({
       cached <- prepare_inventory_cleaned(app_state$cleaned_links)
-      if (nrow(cached) > 0) return(cached)
+      if (nrow(cached) > 0) return(add_inventory_mdro_fields(cached, inventory_cleaned_ast()))
+
+      conn <- app_state$db_conn
+      if (!is.null(conn)) {
+        from_db <- tryCatch(
+          read_table(conn, "cleaned_links"),
+          error = function(e) {
+            warning("read cleaned_links for inventory failed: ", e$message)
+            tibble::tibble()
+          }
+        )
+        from_db <- prepare_inventory_cleaned(from_db)
+        if (nrow(from_db) > 0) return(add_inventory_mdro_fields(from_db, inventory_cleaned_ast()))
+      }
 
       lc  <- app_state$links_confirmed
       ov  <- app_state$cleaned_overrides
@@ -202,21 +221,43 @@ inventoryServer <- function(id, app_state) {
             cleaned_empty()
           }
         )
-        built <- prepare_inventory_cleaned(built)
+        built <- add_inventory_mdro_fields(prepare_inventory_cleaned(built), inventory_cleaned_ast())
         if (nrow(built) > 0) return(built)
       }
 
-      conn <- app_state$db_conn
-      if (is.null(conn)) return(cleaned_empty())
+      cleaned_empty()
+    })
 
-      from_db <- tryCatch(
-        read_table(conn, "cleaned_links"),
+    inventory_cleaned_ast <- shiny::reactive({
+      cached <- app_state$cleaned_ast
+      if (!is.null(cached) && nrow(cached) > 0) return(tibble::as_tibble(cached))
+
+      conn <- app_state$db_conn
+      if (is.null(conn)) return(tibble::tibble())
+
+      tryCatch(
+        read_table(conn, "cleaned_ast"),
         error = function(e) {
-          warning("read cleaned_links for inventory failed: ", e$message)
+          warning("read cleaned_ast for inventory failed: ", e$message)
           tibble::tibble()
         }
       )
-      prepare_inventory_cleaned(from_db)
+    })
+
+    inventory_specimens <- shiny::reactive({
+      cached <- app_state$specimens
+      if (!is.null(cached) && nrow(cached) > 0) return(tibble::as_tibble(cached))
+
+      conn <- app_state$db_conn
+      if (is.null(conn)) return(tibble::tibble())
+
+      tryCatch(
+        read_table(conn, "specimens"),
+        error = function(e) {
+          warning("read specimens for inventory failed: ", e$message)
+          tibble::tibble()
+        }
+      )
     })
 
     # ── Update filter chip selects when data changes ──────────────────────────
@@ -315,15 +356,23 @@ inventoryServer <- function(id, app_state) {
 
     output$kpi_mdro <- shiny::renderText({
       d <- filtered()
-      n <- dplyr::n_distinct(na.omit(d$clean_mdro_category))
+      n <- dplyr::n_distinct(na.omit(d$inv_mdro_category))
       format(n, big.mark = ",")
     })
     output$kpi_mdro_sub <- shiny::renderText("MDRO categories")
 
     # ── Sparklines ────────────────────────────────────────────────────────────
     .spark <- function(series_vec, color = "#1f3a5f") {
-      if (length(series_vec) == 0 || all(is.na(series_vec)))
-        return(echarts4r::e_charts() |> echarts4r::e_line(smooth = TRUE))
+      if (length(series_vec) == 0 || all(is.na(series_vec))) {
+        return(
+          tibble::tibble(x = numeric(), y = numeric()) |>
+            echarts4r::e_charts(x) |>
+            echarts4r::e_line(y, smooth = TRUE, symbol = "none") |>
+            echarts4r::e_x_axis(show = FALSE) |>
+            echarts4r::e_y_axis(show = FALSE) |>
+            echarts4r::e_legend(show = FALSE)
+        )
+      }
 
       df <- tibble::tibble(x = seq_along(series_vec), y = series_vec)
       df |>
@@ -363,7 +412,7 @@ inventoryServer <- function(id, app_state) {
     output$spark_studies <- echarts4r::renderEcharts4r(
       .spark(.spark_series(filtered(), "v_parsed_study"), "#0891b2"))
     output$spark_mdro    <- echarts4r::renderEcharts4r(
-      .spark(.spark_series(filtered(), "clean_mdro_category"), "#7c3aed"))
+      .spark(.spark_series(filtered(), "inv_mdro_category"), "#7c3aed"))
 
     # ── Stacked-area accrual chart ────────────────────────────────────────────
     output$chart_accrual <- echarts4r::renderEcharts4r({
@@ -375,9 +424,9 @@ inventoryServer <- function(id, app_state) {
 
       # Daily counts by MDRO category
       daily <- d |>
-        dplyr::filter(!is.na(v_testing_date), !is.na(clean_mdro_category)) |>
+        dplyr::filter(!is.na(v_testing_date), !is.na(inv_mdro_category)) |>
         dplyr::mutate(date = v_testing_date) |>
-        dplyr::count(date, mdro = clean_mdro_category) |>
+        dplyr::count(date, mdro = inv_mdro_category) |>
         dplyr::arrange(date)
 
       if (nrow(daily) == 0) {
@@ -427,43 +476,32 @@ inventoryServer <- function(id, app_state) {
     # ── Sankey: site → study → parent specimen → MDRO → species ─────────────
     output$chart_sankey <- echarts4r::renderEcharts4r({
       d <- filtered()
-      if (nrow(d) == 0) {
+      os_only_flow <- os_enterococcus_flow_rows(inventory_specimens(), input)
+
+      if (nrow(d) == 0 && nrow(os_only_flow) == 0) {
         return(echarts4r::e_charts() |>
           echarts4r::e_title(subtext = "No data"))
       }
 
-      d_flow <- d |>
-        dplyr::mutate(
-          flow_site = display_flow_site(inv_site_label, project_id, cp_short_title),
-          flow_study = purrr::pmap_chr(
-            list(clean_participant_id, v_parsed_subject, lab_id,
-                 v_parsed_study, clean_cp_title, cp_short_title, project_id),
-            display_flow_study
-          ),
-          flow_parent = display_flow_parent(clean_parent_specimen_type),
-          flow_mdro = normalize_flow_mdro(
-            clean_mdro_category,
-            os_mdro = o_custom_mdro,
-            disagree = mdro_disagree
-          ),
-          flow_species = clean_organism
-        ) |>
-        dplyr::mutate(
-          flow_site = dplyr::na_if(trimws(as.character(flow_site)), ""),
-          flow_study = dplyr::na_if(trimws(as.character(flow_study)), ""),
-          flow_parent = dplyr::coalesce(
-            dplyr::na_if(trimws(as.character(flow_parent)), ""),
-            "Parent specimen unspecified"
-          ),
-          flow_mdro = dplyr::coalesce(
-            dplyr::na_if(trimws(as.character(flow_mdro)), ""),
-            "MDRO unspecified"
-          ),
-          flow_species = dplyr::coalesce(
-            dplyr::na_if(trimws(as.character(flow_species)), ""),
-            "Species unspecified"
+      linked_flow <- if (nrow(d) > 0) {
+        d |>
+          dplyr::mutate(
+            flow_site = display_flow_site(inv_site_label, project_id, cp_short_title),
+            flow_study = purrr::pmap_chr(
+              list(clean_participant_id, v_parsed_subject, lab_id,
+                   v_parsed_study, clean_cp_title, cp_short_title, project_id),
+              display_flow_study
+            ),
+            flow_parent = display_flow_parent(clean_parent_specimen_type),
+            flow_mdro = canonical_flow_mdro(inv_mdro_category),
+            flow_species = clean_organism
           )
-        ) |>
+      } else {
+        tibble::tibble()
+      }
+
+      d_flow <- dplyr::bind_rows(linked_flow, os_only_flow) |>
+        normalize_flow_columns() |>
         dplyr::filter(!is.na(flow_site), !is.na(flow_study))
 
       edges <- dplyr::bind_rows(
@@ -555,6 +593,15 @@ inventoryServer <- function(id, app_state) {
         }
       )
       chart
+    })
+
+    output$sankey_footnote <- shiny::renderText({
+      os_only_n <- nrow(os_enterococcus_flow_rows(inventory_specimens(), input))
+      if (os_only_n == 0) return("")
+      sprintf(
+        "Footnote: %s Enterococcus faecium/faecalis Cryopreserved Cells isolates are included from OpenSpecimen only; VRE/non-VRE status for these isolates was not confirmed by Vitek2 AST in AXIS.",
+        format(os_only_n, big.mark = ",")
+      )
     })
 
     # ── Sites map ─────────────────────────────────────────────────────────────
@@ -660,6 +707,132 @@ prepare_inventory_cleaned <- function(d) {
       clean_testing_date = as.Date(clean_testing_date),
       o_custom_collection_date = as.Date(o_custom_collection_date)
     )
+}
+
+add_inventory_mdro_fields <- function(d, cleaned_ast = NULL) {
+  if (is.null(d) || nrow(d) == 0) return(d)
+
+  interpreted <- axis_interpret_mdro_categories(d, cleaned_ast)
+  if (nrow(interpreted) == 0) {
+    d$inv_mdro_category <- "Unspecified"
+    d$inv_mdro_basis <- "missing or uninterpretable category"
+    return(d)
+  }
+
+  d |>
+    dplyr::select(-dplyr::any_of(c("inv_mdro_category", "inv_mdro_basis"))) |>
+    dplyr::left_join(interpreted, by = "link_id") |>
+    dplyr::mutate(
+      inv_mdro_category = dplyr::coalesce(
+        dplyr::na_if(as.character(.data$inv_mdro_category), ""),
+        "Unspecified"
+      ),
+      inv_mdro_basis = dplyr::coalesce(
+        dplyr::na_if(as.character(.data$inv_mdro_basis), ""),
+        "missing or uninterpretable category"
+      )
+    )
+}
+
+normalize_flow_columns <- function(d) {
+  if (is.null(d) || nrow(d) == 0) return(d)
+
+  d |>
+    dplyr::mutate(
+      flow_site = dplyr::na_if(trimws(as.character(flow_site)), ""),
+      flow_study = dplyr::na_if(trimws(as.character(flow_study)), ""),
+      flow_parent = dplyr::coalesce(
+        dplyr::na_if(trimws(as.character(flow_parent)), ""),
+        "Parent specimen unspecified"
+      ),
+      flow_mdro = dplyr::coalesce(
+        dplyr::na_if(trimws(as.character(flow_mdro)), ""),
+        "MDRO unspecified"
+      ),
+      flow_species = dplyr::coalesce(
+        dplyr::na_if(trimws(as.character(flow_species)), ""),
+        "Species unspecified"
+      )
+    )
+}
+
+os_enterococcus_flow_rows <- function(specimens, input = NULL) {
+  if (is.null(specimens) || nrow(specimens) == 0) {
+    return(tibble::tibble(
+      flow_site = character(),
+      flow_study = character(),
+      flow_parent = character(),
+      flow_mdro = character(),
+      flow_species = character()
+    ))
+  }
+
+  d <- tibble::as_tibble(specimens)
+  needed <- c(
+    "type", "custom_organism", "custom_mdro", "participant_id",
+    "specimen_label", "cp_short_title", "project_id",
+    "custom_parent_specimen_type", "custom_collection_date", "collection_dt"
+  )
+  for (col in setdiff(needed, names(d))) {
+    d[[col]] <- NA_character_
+  }
+
+  d <- d |>
+    dplyr::mutate(
+      .organism_norm = toupper(gsub("\\s+", " ", trimws(as.character(custom_organism)))),
+      .mdro_norm = toupper(trimws(as.character(custom_mdro))),
+      .os_date = dplyr::coalesce(
+        suppressWarnings(as.Date(custom_collection_date)),
+        suppressWarnings(as.Date(collection_dt))
+      )
+    ) |>
+    dplyr::filter(
+      toupper(trimws(as.character(type))) == "CRYOPRESERVED CELLS",
+      .organism_norm %in% c("ENTEROCOCCUS FAECIUM", "ENTEROCOCCUS FAECALIS")
+    ) |>
+    dplyr::mutate(
+      flow_site = display_flow_site(NA_character_, project_id, cp_short_title),
+      flow_study = purrr::pmap_chr(
+        list(participant_id, participant_id, specimen_label,
+             NA_character_, cp_short_title, cp_short_title, project_id),
+        display_flow_study
+      ),
+      flow_parent = display_flow_parent(dplyr::coalesce(
+        dplyr::na_if(as.character(custom_parent_specimen_type), ""),
+        as.character(type)
+      )),
+      flow_species = dplyr::case_when(
+        .organism_norm == "ENTEROCOCCUS FAECIUM" ~ "Enterococcus faecium",
+        .organism_norm == "ENTEROCOCCUS FAECALIS" ~ "Enterococcus faecalis",
+        TRUE ~ as.character(custom_organism)
+      ),
+      flow_mdro = dplyr::case_when(
+        grepl("VRE|POSITIVE|YES|VANCOMYCIN", .mdro_norm) ~ "VRE",
+        grepl("NEGATIVE|NO|NON[- ]?VRE|VSE|NON[- ]?MDRO|NONE", .mdro_norm) ~ "Non-MDRO",
+        TRUE ~ "Unspecified"
+      )
+    )
+
+  if (!is.null(input)) {
+    if (!is.null(input$f_study) && input$f_study != "All")
+      d <- dplyr::filter(d, flow_study == input$f_study)
+    if (!is.null(input$f_site) && input$f_site != "All")
+      d <- dplyr::filter(d, flow_site == input$f_site)
+    if (!is.null(input$f_specimen) && input$f_specimen != "All")
+      d <- dplyr::filter(d, flow_parent == input$f_specimen)
+    if (!is.null(input$f_species) && input$f_species != "All")
+      d <- dplyr::filter(d, flow_species == input$f_species)
+    if (!is.null(input$f_range)) {
+      d <- dplyr::filter(
+        d,
+        is.na(.os_date) |
+          (.os_date >= input$f_range[1] & .os_date <= input$f_range[2])
+      )
+    }
+  }
+
+  d |>
+    dplyr::transmute(flow_site, flow_study, flow_parent, flow_mdro, flow_species)
 }
 
 add_inventory_site_fields <- function(d) {

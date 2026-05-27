@@ -15,6 +15,7 @@ MDRO_COLORS <- c(
   "MDRA"      = "#a16207",
   "C. auris"  = "#be185d",
   "Non-MDRO"  = "#6b7280",
+  "Unspecified" = "#64748b",
   "MDRO positive (unspecified)" = "#64748b"
 )
 
