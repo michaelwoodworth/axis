@@ -383,6 +383,10 @@ linkingServer <- function(id, app_state) {
     # Commit from the Linking tab using the same persistence path as Ingestion.
     shiny::observeEvent(input$commit_matched, {
       tryCatch({
+        session$sendCustomMessage(
+          "axis_busy_show",
+          list(text = "Committing matched rows, rebuilding cleaned tables, and refreshing inventory panels.")
+        )
         buckets <- app_state$match_buckets
         matched <- if (!is.null(buckets)) buckets$matched else NULL
         if (is.null(matched) || nrow(matched) == 0) {
@@ -430,6 +434,8 @@ linkingServer <- function(id, app_state) {
           duration = 10
         )
         warning("AXIS linking commit_matched failed: ", e$message)
+      }, finally = {
+        session$sendCustomMessage("axis_busy_hide", list())
       })
     })
 

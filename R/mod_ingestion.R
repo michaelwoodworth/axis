@@ -650,6 +650,10 @@ ingestionServer <- function(id, app_state) {
     # ── Commit → DuckDB ────────────────────────────────────────────────────
     observeEvent(input$commit_matched, {
       tryCatch({
+        session$sendCustomMessage(
+          "axis_busy_show",
+          list(text = "Committing matched rows, rebuilding cleaned tables, and refreshing inventory panels.")
+        )
         req(rv$buckets, rv$db_conn)
         matched <- rv$buckets$matched
         if (is.null(matched) || nrow(matched) == 0) {
@@ -692,6 +696,8 @@ ingestionServer <- function(id, app_state) {
           duration = 10
         )
         warning("AXIS commit_matched failed: ", e$message)
+      }, finally = {
+        session$sendCustomMessage("axis_busy_hide", list())
       })
     })
 
