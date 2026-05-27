@@ -91,11 +91,11 @@ ui <- bslib::page_navbar(
   fillable = TRUE,
 
   # ── Nav panels ──────────────────────────────────────────────────────────────
-  bslib::nav_panel("Overview",   overviewUI("overview"),  fillable = FALSE),
-  bslib::nav_panel("Inventory",  inventoryUI("inventory"), fillable = FALSE),
   bslib::nav_panel("Ingestion",  ingestionUI("ingestion"), fillable = TRUE),
   bslib::nav_panel("Linking",    linkingUI("linking"),     fillable = FALSE),
-  bslib::nav_panel("Specimens",  specimensUI("specimens"), fillable = FALSE),
+  bslib::nav_panel("Inventory",  inventoryUI("inventory"), fillable = FALSE),
+  # bslib::nav_panel("Overview",   overviewUI("overview"),  fillable = FALSE),
+  # bslib::nav_panel("Specimens",  specimensUI("specimens"), fillable = FALSE),
 
   bslib::nav_spacer(),
 
