@@ -439,7 +439,11 @@ inventoryServer <- function(id, app_state) {
           flow_site = inv_site_label,
           flow_study = dplyr::coalesce(v_parsed_study, clean_cp_title, project_id),
           flow_parent = clean_parent_specimen_type,
-          flow_mdro = normalize_flow_mdro(clean_mdro_category),
+          flow_mdro = normalize_flow_mdro(
+            clean_mdro_category,
+            os_mdro = o_custom_mdro,
+            disagree = mdro_disagree
+          ),
           flow_species = clean_organism
         ) |>
         dplyr::mutate(
@@ -481,26 +485,37 @@ inventoryServer <- function(id, app_state) {
           echarts4r::e_title(subtext = "Insufficient data for Sankey"))
       }
 
-      # e_sankey API: pipe the edges df into e_charts(), then call e_sankey(source, target, value)
-      # Node names are inferred from unique source + target values.
-      # Strip the internal prefixes so the chart labels are readable.
-      edges_display <- edges |>
-        dplyr::mutate(
-          source = sub("^(site:|study:|parent:|mdro:|species:)", "", source),
-          target = sub("^(site:|study:|parent:|mdro:|species:)", "", target)
-        )
+      # Keep layer prefixes in node IDs so identical labels in different columns
+      # do not collapse into one ECharts node. Strip prefixes only for display.
+      strip_prefix_js <- htmlwidgets::JS(
+        "function(params) {",
+        "  var name = params.name || '';",
+        "  return name.replace(/^(site:|study:|parent:|mdro:|species:)/, '');",
+        "}"
+      )
+      tooltip_js <- htmlwidgets::JS(
+        "function(params) {",
+        "  function clean(x) { return String(x || '').replace(/^(site:|study:|parent:|mdro:|species:)/, ''); }",
+        "  if (params.data && params.data.source && params.data.target) {",
+        "    return clean(params.data.source) + ' → ' + clean(params.data.target) + '<br/>' + params.data.value + ' specimens';",
+        "  }",
+        "  return clean(params.name);",
+        "}"
+      )
 
-      edges_display |>
+      edges |>
         echarts4r::e_charts() |>
         echarts4r::e_sankey(
           source, target, value,
           nodeWidth   = 12,
           nodePadding = 10,
-          label       = list(fontSize = 11, color = "#374151"),
+          layoutIterations = 64,
+          emphasis    = list(focus = "adjacency"),
+          label       = list(fontSize = 11, color = "#374151", formatter = strip_prefix_js),
           itemStyle   = list(borderWidth = 0),
-          lineStyle   = list(color = "gradient", opacity = 0.4)
+          lineStyle   = list(color = "gradient", opacity = 0.45, curveness = 0.5)
         ) |>
-        echarts4r::e_tooltip(trigger = "item") |>
+        echarts4r::e_tooltip(trigger = "item", formatter = tooltip_js) |>
         echarts4r::e_grid(top = 10, bottom = 10, left = 20, right = 20)
     })
 
@@ -681,10 +696,52 @@ site_prefix_from_id <- function(id) {
   NA_character_
 }
 
-normalize_flow_mdro <- function(x) {
-  x <- trimws(as.character(x))
-  x[x %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
-  non_mdro <- !is.na(x) & grepl("^(non[- ]?mdro|none|no mdro|negative)$", x, ignore.case = TRUE)
-  x[non_mdro] <- "Non-MDRO"
-  x
+normalize_flow_mdro <- function(x, os_mdro = NULL, disagree = NULL) {
+  clean <- canonical_flow_mdro(x)
+  os <- if (is.null(os_mdro)) rep(NA_character_, length(clean)) else canonical_flow_mdro(os_mdro)
+  if (is.null(disagree)) disagree <- rep(FALSE, length(clean))
+  disagree <- !is.na(disagree) & disagree
+
+  mismatch <- disagree & !is.na(clean) & !is.na(os) & clean != os
+  clean[mismatch] <- paste0("MDRO mismatch: ", clean[mismatch], " vs ", os[mismatch])
+  clean
+}
+
+canonical_flow_mdro <- function(x) {
+  raw <- trimws(as.character(x))
+  raw[raw %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
+  upper <- toupper(raw)
+
+  result <- rep(NA_character_, length(raw))
+  result[!is.na(upper) & grepl("^(NON[- ]?MDRO|NONE|NO MDRO|NEGATIVE)$", upper)] <- "Non-MDRO"
+  result[!is.na(upper) & grepl("^(POSITIVE|MDRO POSITIVE)$", upper)] <- "MDRO positive (unspecified)"
+
+  token_map <- c(
+    ESBL = "ESBL",
+    CRE = "CRE",
+    CRKP = "CRE",
+    CREC = "CRE",
+    VRE = "VRE",
+    MRSA = "MRSA",
+    CRAB = "CRAB",
+    CRPA = "CRPA",
+    MDRP = "MDRP",
+    MDRA = "MDRA"
+  )
+
+  remaining <- which(is.na(result) & !is.na(upper))
+  for (i in remaining) {
+    for (tok in names(token_map)) {
+      if (grepl(tok, upper[[i]], fixed = TRUE)) {
+        result[[i]] <- token_map[[tok]]
+        break
+      }
+    }
+    if (is.na(result[[i]]) &&
+        grepl("MULTIDRUG[- ]RESISTANT PSEUDOMONAS|MDR PSEUDOMONAS", upper[[i]])) {
+      result[[i]] <- "MDRP"
+    }
+  }
+
+  dplyr::coalesce(result, raw)
 }

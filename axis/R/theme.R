@@ -11,7 +11,11 @@ MDRO_COLORS <- c(
   "CRE"       = "#dc2626",
   "CRAB"      = "#ca8a04",
   "CRPA"      = "#15803d",
-  "C. auris"  = "#be185d"
+  "MDRP"      = "#15803d",
+  "MDRA"      = "#a16207",
+  "C. auris"  = "#be185d",
+  "Non-MDRO"  = "#6b7280",
+  "MDRO positive (unspecified)" = "#64748b"
 )
 
 # bslib theme (HANDOFF.md §6)
