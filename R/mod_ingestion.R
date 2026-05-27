@@ -657,50 +657,31 @@ ingestionServer <- function(id, app_state) {
           return()
         }
 
-        links <- build_links_from_matches(matched, rv$batch_id)
-        n     <- write_links(rv$db_conn, links)
-        written_sources <- write_ingested_tables(
-          rv$db_conn,
-          batch_id  = rv$batch_id,
-          vitek_raw = rv$vitek_raw,
-          vitek_ast = rv$vitek_ast,
-          specimens = rv$specimens
+        result <- commit_matched_links(
+          conn              = rv$db_conn,
+          matched           = matched,
+          batch_id          = rv$batch_id,
+          vitek_raw         = rv$vitek_raw,
+          vitek_ast         = rv$vitek_ast,
+          vitek_unique      = rv$vitek_unique,
+          specimens         = rv$specimens,
+          cleaned_overrides = app_state$cleaned_overrides,
+          csv_path          = cleaned_csv_path(),
+          formats           = c("csv", "xlsx", "duckdb")
         )
-
-        app_state$links_confirmed <- tryCatch(
-          read_table(rv$db_conn, "links_confirmed"),
-          error = function(e) NULL
-        )
-        app_state$cleaned_overrides <- tryCatch(
-          read_table(rv$db_conn, "cleaned_overrides"),
-          error = function(e) tibble::tibble()
-        )
-
-        cleaned_links <- build_cleaned(
-          links     = app_state$links_confirmed,
-          overrides = app_state$cleaned_overrides,
-          vitek     = rv$vitek_unique,
-          specimens = rv$specimens
-        )
-        cleaned_ast <- build_cleaned_ast(cleaned_links, rv$vitek_ast)
-        export_info <- export_cleaned_dataset(
-          cleaned     = cleaned_links,
-          cleaned_ast = cleaned_ast,
-          batch_id    = rv$batch_id,
-          output_dir  = file.path("data", "exports"),
-          csv_path    = cleaned_csv_path(),
-          formats     = c("csv", "xlsx", "duckdb"),
-          conn        = rv$db_conn
-        )
-        app_state$cleaned_links <- cleaned_links
-        app_state$cleaned_ast   <- cleaned_ast
+        app_state$links_confirmed   <- result$links_confirmed
+        app_state$cleaned_overrides <- result$cleaned_overrides
+        app_state$cleaned_links     <- result$cleaned_links
+        app_state$cleaned_ast       <- result$cleaned_ast
 
         showNotification(
           sprintf(
             "%d link%s committed to AXIS_clean_%s. Exported %d cleaned rows and %d AST rows.",
-            n, if (n == 1L) "" else "s", rv$batch_id,
-            export_info$n_cleaned,
-            export_info$n_ast
+            result$n_committed,
+            if (result$n_committed == 1L) "" else "s",
+            rv$batch_id,
+            result$export_info$n_cleaned,
+            result$export_info$n_ast
           ),
           type = "message", duration = 6
         )
@@ -786,10 +767,7 @@ ingestionServer <- function(id, app_state) {
     })
 
     observeEvent(input$open_review, {
-      showNotification(
-        "Review queue → navigate to the Linking tab (Prompt C).",
-        duration = 5
-      )
+      session$sendCustomMessage("axis_select_nav", list(value = "Linking"))
     })
 
     # ── Per-file rows ──────────────────────────────────────────────────────

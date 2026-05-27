@@ -89,6 +89,12 @@ inventoryUI <- function(id) {
                           padding:18px; box-shadow:0 1px 3px rgba(0,0,0,.05); }
     .inv-card-title     { font-size:12px; font-weight:700; text-transform:uppercase;
                           letter-spacing:.6px; color:#6b7280; margin-bottom:12px; }
+    .inv-card-head      { display:flex; align-items:center; justify-content:space-between;
+                          gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+    .inv-card-head .inv-card-title { margin-bottom:0; }
+    .inv-flow-option    { font-size:12px; color:#374151; }
+    .inv-flow-option .form-check { margin:0; }
+    .inv-flow-option .form-check-label { white-space:nowrap; }
     .inv-footnote       { font-size:11px; color:#6b7280; line-height:1.35;
                           margin-top:10px; max-width:920px; }
     .inv-empty          { display:flex; align-items:center; justify-content:center;
@@ -164,7 +170,18 @@ inventoryUI <- function(id) {
       # ── Specimen flow ───────────────────────────────────────────────────────
       shiny::div(
         class = "inv-card",
-        shiny::div(class = "inv-card-title", "Specimen flow: Site → Study → Parent specimen → MDRO → Species"),
+        shiny::div(
+          class = "inv-card-head",
+          shiny::div(class = "inv-card-title", "Specimen flow: Site → Study → Parent specimen → MDRO → Species"),
+          shiny::div(
+            class = "inv-flow-option",
+            shiny::checkboxInput(
+              ns("include_os_enterococcus"),
+              "Include OS-only Enterococcus",
+              value = FALSE
+            )
+          )
+        ),
         echarts4r::echarts4rOutput(ns("chart_sankey"), height = "360px"),
         shiny::div(
           class = "inv-footnote",
@@ -476,7 +493,12 @@ inventoryServer <- function(id, app_state) {
     # ── Sankey: site → study → parent specimen → MDRO → species ─────────────
     output$chart_sankey <- echarts4r::renderEcharts4r({
       d <- filtered()
-      os_only_flow <- os_enterococcus_flow_rows(inventory_specimens(), input)
+      include_os_only <- isTRUE(input$include_os_enterococcus)
+      os_only_flow <- if (nrow(d) > 0 && include_os_only) {
+        os_enterococcus_flow_rows(inventory_specimens(), input)
+      } else {
+        flow_empty()
+      }
 
       if (nrow(d) == 0 && nrow(os_only_flow) == 0) {
         return(echarts4r::e_charts() |>
@@ -596,6 +618,8 @@ inventoryServer <- function(id, app_state) {
     })
 
     output$sankey_footnote <- shiny::renderText({
+      if (nrow(filtered()) == 0) return("")
+      if (!isTRUE(input$include_os_enterococcus)) return("")
       os_only_n <- nrow(os_enterococcus_flow_rows(inventory_specimens(), input))
       if (os_only_n == 0) return("")
       sprintf(
@@ -756,15 +780,19 @@ normalize_flow_columns <- function(d) {
     )
 }
 
+flow_empty <- function() {
+  tibble::tibble(
+    flow_site = character(),
+    flow_study = character(),
+    flow_parent = character(),
+    flow_mdro = character(),
+    flow_species = character()
+  )
+}
+
 os_enterococcus_flow_rows <- function(specimens, input = NULL) {
   if (is.null(specimens) || nrow(specimens) == 0) {
-    return(tibble::tibble(
-      flow_site = character(),
-      flow_study = character(),
-      flow_parent = character(),
-      flow_mdro = character(),
-      flow_species = character()
-    ))
+    return(flow_empty())
   }
 
   d <- tibble::as_tibble(specimens)

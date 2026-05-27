@@ -341,6 +341,85 @@ build_links_from_matches <- function(matched_tbl, batch_id, created_by = "analys
     )
 }
 
+#' Commit auto-matched links and refresh cleaned exports.
+#'
+#' Shared by the Ingestion and Linking modules so the "Commit matched only"
+#' action behaves the same from either tab. Source tables are append-only landing
+#' tables; cleaned exports are rebuilt from confirmed links plus overrides.
+commit_matched_links <- function(conn, matched, batch_id,
+                                 vitek_raw = NULL,
+                                 vitek_ast = NULL,
+                                 vitek_unique = NULL,
+                                 specimens = NULL,
+                                 cleaned_overrides = NULL,
+                                 csv_path = NULL,
+                                 output_dir = file.path("data", "exports"),
+                                 formats = c("csv", "xlsx", "duckdb")) {
+  if (is.null(conn)) stop("DuckDB connection is not available.")
+  if (is.null(batch_id) || !nzchar(as.character(batch_id))) {
+    stop("Batch id is not available.")
+  }
+  if (is.null(matched) || nrow(matched) == 0) {
+    stop("No auto-matched records are staged to commit.")
+  }
+  if (is.null(vitek_unique) || nrow(vitek_unique) == 0 ||
+      is.null(specimens) || nrow(specimens) == 0) {
+    stop("Parsed Vitek and OpenSpecimen data are not available. Run ingestion/automerge first.")
+  }
+
+  links <- build_links_from_matches(matched, batch_id)
+  n <- write_links(conn, links)
+  written_sources <- c(vitek_raw = 0L, vitek_ast = 0L, specimens = 0L)
+  if (n > 0L) {
+    written_sources <- write_ingested_tables(
+      conn,
+      batch_id  = batch_id,
+      vitek_raw = vitek_raw,
+      vitek_ast = vitek_ast,
+      specimens = specimens
+    )
+  }
+
+  links_confirmed <- tryCatch(
+    read_table(conn, "links_confirmed"),
+    error = function(e) tibble::tibble()
+  )
+  overrides <- cleaned_overrides
+  if (is.null(overrides)) {
+    overrides <- tryCatch(
+      read_table(conn, "cleaned_overrides"),
+      error = function(e) tibble::tibble()
+    )
+  }
+
+  cleaned_links <- build_cleaned(
+    links     = links_confirmed,
+    overrides = overrides,
+    vitek     = vitek_unique,
+    specimens = specimens
+  )
+  cleaned_ast <- build_cleaned_ast(cleaned_links, vitek_ast)
+  export_info <- export_cleaned_dataset(
+    cleaned     = cleaned_links,
+    cleaned_ast = cleaned_ast,
+    batch_id    = batch_id,
+    output_dir  = output_dir,
+    csv_path    = csv_path,
+    formats     = formats,
+    conn        = conn
+  )
+
+  list(
+    n_committed = n,
+    written_sources = written_sources,
+    links_confirmed = links_confirmed,
+    cleaned_overrides = overrides,
+    cleaned_links = cleaned_links,
+    cleaned_ast = cleaned_ast,
+    export_info = export_info
+  )
+}
+
 .with_batch <- function(df, batch_id) {
   df <- tibble::as_tibble(df)
   if ("batch_id" %in% names(df)) df$batch_id <- batch_id
@@ -369,18 +448,31 @@ build_links_from_matches <- function(matched_tbl, batch_id, created_by = "analys
 }
 
 .replace_batch_rows <- function(conn, table_name, df, batch_id) {
+  df <- tibble::as_tibble(df)
   exists <- table_name %in% DBI::dbListTables(conn)
   if (exists) {
+    .ensure_db_columns(conn, table_name, .infer_db_columns(df))
     DBI::dbExecute(
       conn,
       paste0("DELETE FROM ", DBI::dbQuoteIdentifier(conn, table_name), " WHERE batch_id = ?"),
       params = list(batch_id)
     )
-    DBI::dbWriteTable(conn, table_name, df, append = TRUE)
+    .append_table_aligned(conn, table_name, df)
   } else {
     DBI::dbWriteTable(conn, table_name, df, overwrite = TRUE)
   }
   invisible(nrow(df))
+}
+
+.infer_db_columns <- function(df) {
+  vapply(df, function(x) {
+    if (inherits(x, "POSIXct") || inherits(x, "POSIXt")) return("TIMESTAMP")
+    if (inherits(x, "Date")) return("DATE")
+    if (is.integer(x)) return("INTEGER")
+    if (is.numeric(x)) return("DOUBLE")
+    if (is.logical(x)) return("BOOLEAN")
+    "VARCHAR"
+  }, character(1), USE.NAMES = TRUE)
 }
 
 .table_columns <- function(conn, table_name) {
