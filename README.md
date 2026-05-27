@@ -3,7 +3,7 @@
 </p>
 
 
-SOP: *Install, Clone, and Run the AXIS Shiny App*
+*Install, Clone, and Run the AXIS Shiny App*
 Shiny app to link OpenSpecimen inventories with Vitek2 data
 
 ## Purpose
