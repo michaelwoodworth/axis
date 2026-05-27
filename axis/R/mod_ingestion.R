@@ -1212,7 +1212,7 @@ ui_bucket_col <- function(title, count, subtitle, tone, tone_soft,
     tags$div(
       class = "bucket-col-hd",
       tags$span(style = sprintf(
-        "width:8px; height:8px; border-radius:50%;
+        "width:8px; height:8px; border-radius:50%%;
          background:%s; display:inline-block; flex-shrink:0;", tone
       )),
       tags$div(
