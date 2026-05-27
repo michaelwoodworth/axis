@@ -711,6 +711,7 @@ derive_site_code <- function(participant_id, parsed_subject, lab_id,
   }
 
   study <- toupper(paste(na.omit(c(parsed_study, cp_short_title)), collapse = " "))
+  if (grepl("\\bFAIR\\b|FAIR618|FAIR_OUTPUT", study)) return("ARRRRG_ATL")
   if (grepl("ARRRRG", study)) return("ARRRRG_ATL")
   if (grepl("SNT|SENTINEL|APPS|REACT", study)) return("SENTINEL_REACT_DECATUR")
   NA_character_
@@ -747,7 +748,7 @@ display_flow_site <- function(site_label, project_id = NULL, cp_short_title = NU
   upper <- toupper(raw)
 
   out <- raw
-  out[!is.na(upper) & grepl("^FAIR(_OUTPUT)?$|^FAIR\\b|FAIR618", upper)] <- "FAIR"
+  out[!is.na(upper) & grepl("^FAIR(_OUTPUT)?$|^FAIR\\b|FAIR618", upper)] <- "Emory University Hospital"
   out[!is.na(upper) & grepl("EMORY LONG TERM|LONG TERM ACUTE|ELTAC", upper)] <- "ELTAC"
   out[!is.na(upper) & grepl("A\\.?G\\.? RHODES|AG RHODES|A G RHODES", upper)] <- "A.G. Rhodes"
   out <- sub("_output$", "", out, ignore.case = TRUE)
