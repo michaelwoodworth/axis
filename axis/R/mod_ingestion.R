@@ -264,12 +264,7 @@ ingestionUI <- function(id) {
 
         tags$div(class = "ing-panel",
           tags$div(class = "ing-merge-panel",
-            actionButton(
-              ns("run_match"), "Start automerge linkage",
-              class = "btn btn-sm btn-primary",
-              style = sprintf("background:%s; border-color:%s; white-space:normal;",
-                              .AX$primary, .AX$primary)
-            ),
+            uiOutput(ns("run_match_button")),
             tags$div(
               class = "ing-merge-note",
               "Parse Vitek2 and OpenSpecimen files first, then run candidate linkage."
@@ -362,12 +357,7 @@ ingestionUI <- function(id) {
             uiOutput(ns("match_preview_subtitle"), inline = TRUE)
           ),
           uiOutput(ns("match_bar_ui")),
-          actionButton(
-            ns("rerun_match"), "Re-run automerge",
-            class = "btn btn-sm btn-primary ms-2",
-            style = sprintf("background:%s; border-color:%s;",
-                            .AX$primary, .AX$primary)
-          )
+          uiOutput(ns("rerun_match_button"))
         ),
         uiOutput(ns("project_match_breakdowns"))
       ),
@@ -528,6 +518,16 @@ ingestionServer <- function(id, app_state) {
       rv$available_projects$project_id
     })
 
+    merge_ready <- reactive({
+      n_v <- if (!is.null(rv$vitek_unique)) nrow(rv$vitek_unique) else 0L
+      n_s <- if (!is.null(rv$specimens)) nrow(rv$specimens) else 0L
+      list(
+        n_v = n_v,
+        n_s = n_s,
+        ready = n_v > 0L && n_s > 0L
+      )
+    })
+
     # ── Auto-match logic ───────────────────────────────────────────────────
     run_match <- function() {
       if (is.null(rv$vitek_unique) || nrow(rv$vitek_unique) == 0L) {
@@ -539,10 +539,15 @@ ingestionServer <- function(id, app_state) {
         return(invisible(NULL))
       }
 
+      state <- merge_ready()
       shinybusy::show_modal_spinner(
         spin  = "orbit",
         color = .AX$primary,
-        text  = "Running auto-match…"
+        text  = sprintf(
+          "Running auto-match for %s Vitek rows against %s OpenSpecimen specimens…",
+          format(state$n_v, big.mark = ","),
+          format(state$n_s, big.mark = ",")
+        )
       )
 
       tryCatch({
@@ -689,20 +694,67 @@ ingestionServer <- function(id, app_state) {
     })
 
     output$merge_ready_status <- renderUI({
-      n_v <- if (!is.null(rv$vitek_unique)) nrow(rv$vitek_unique) else 0L
-      n_s <- if (!is.null(rv$specimens)) nrow(rv$specimens) else 0L
-      ready <- n_v > 0L && n_s > 0L
+      state <- merge_ready()
+      n_v <- state$n_v
+      n_s <- state$n_s
+      ready <- state$ready
+      status <- dplyr::case_when(
+        ready ~ sprintf("%s Vitek rows · %s OS specimens · ready",
+                        format(n_v, big.mark = ","),
+                        format(n_s, big.mark = ",")),
+        n_v == 0L && n_s == 0L ~ "need Vitek2 rows and OpenSpecimen specimens",
+        n_v == 0L ~ sprintf("need Vitek2 rows · %s OS specimens loaded",
+                            format(n_s, big.mark = ",")),
+        n_s == 0L ~ sprintf("%s Vitek rows loaded · need OpenSpecimen specimens",
+                            format(n_v, big.mark = ",")),
+        TRUE ~ "waiting for both inputs"
+      )
       tags$div(
         style = sprintf(
-          "font-size:10.5px; font-family:'IBM Plex Mono',monospace; color:%s;",
+          "font-size:10.5px; font-family:'IBM Plex Mono',monospace; color:%s;
+           line-height:1.35;",
           if (ready) .AX$ok else .AX$muted
         ),
-        if (ready) {
-          sprintf("%s Vitek rows · %s OS specimens",
-                  format(n_v, big.mark = ","),
-                  format(n_s, big.mark = ","))
+        status
+      )
+    })
+
+    output$run_match_button <- renderUI({
+      state <- merge_ready()
+      tags$button(
+        id = ns("run_match"),
+        type = "button",
+        "Start automerge linkage",
+        class = "btn btn-sm btn-primary action-button",
+        style = sprintf(
+          "background:%s; border-color:%s; white-space:normal; opacity:%s;",
+          .AX$primary, .AX$primary, if (state$ready) "1" else ".55"
+        ),
+        disabled = if (state$ready) NULL else "disabled",
+        title = if (state$ready) {
+          "Run linkage"
         } else {
-          "waiting for both inputs"
+          "Upload parsed Vitek2 and OpenSpecimen exports before running linkage"
+        }
+      )
+    })
+
+    output$rerun_match_button <- renderUI({
+      state <- merge_ready()
+      tags$button(
+        id = ns("rerun_match"),
+        type = "button",
+        "Re-run automerge",
+        class = "btn btn-sm btn-primary ms-2 action-button",
+        style = sprintf(
+          "background:%s; border-color:%s; opacity:%s;",
+          .AX$primary, .AX$primary, if (state$ready) "1" else ".55"
+        ),
+        disabled = if (state$ready) NULL else "disabled",
+        title = if (state$ready) {
+          "Re-run linkage"
+        } else {
+          "Upload parsed Vitek2 and OpenSpecimen exports before running linkage"
         }
       )
     })
