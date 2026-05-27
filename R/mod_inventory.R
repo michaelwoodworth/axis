@@ -64,12 +64,20 @@ inventoryUI <- function(id) {
                           border-radius:18px 0 0 18px;
                           border-right:1px solid #d1d5db; }
     .inv-chip-wrap .form-group,
-    .inv-chip-wrap .shiny-input-container { margin:0 !important; overflow:visible !important; }
+    .inv-chip-wrap .shiny-input-container { margin:0 !important; overflow:visible !important;
+                          width:auto !important; min-width:150px; }
     .inv-chip-wrap select,
-    .inv-chip-wrap input { position:relative; z-index:1011; background:#fff; }
+    .inv-chip-wrap input { position:relative; z-index:1011; background:#fff;
+                          min-width:150px; max-width:260px; }
+    .inv-chip-wrap .selectize-control { min-width:150px; max-width:260px; }
+    .inv-chip-wrap .selectize-input { min-height:26px; padding:4px 28px 4px 8px;
+                          border:0; box-shadow:none; background:#fff;
+                          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .inv-chip-wrap .selectize-input > * { max-width:220px; overflow:hidden;
+                          text-overflow:ellipsis; white-space:nowrap; }
     .inv-chip-select    { border:none; background:transparent; padding:4px 10px 4px 6px;
                           font-size:12px; color:#1f3a5f; font-weight:500;
-                          outline:none; cursor:pointer; min-width:80px;
+                          outline:none; cursor:pointer; min-width:150px; max-width:260px;
                           -webkit-appearance:none; appearance:none; }
     .inv-hero           { background:#fff; border:1px solid #e8e6e0; border-radius:10px;
                           padding:20px; box-shadow:0 1px 3px rgba(0,0,0,.05); }
@@ -801,10 +809,10 @@ normalize_flow_columns <- function(d) {
 
   d |>
     dplyr::mutate(
-      flow_site = dplyr::na_if(trimws(as.character(flow_site)), ""),
+      flow_site = canonical_flow_site(flow_site),
       flow_study = canonical_flow_study(flow_study),
       flow_parent = dplyr::coalesce(
-        dplyr::na_if(trimws(as.character(flow_parent)), ""),
+        canonical_flow_parent(flow_parent),
         "Parent specimen unspecified"
       ),
       flow_mdro = dplyr::coalesce(
@@ -818,6 +826,23 @@ normalize_flow_columns <- function(d) {
     )
 }
 
+canonical_flow_site <- function(site) {
+  raw <- trimws(as.character(site))
+  raw[raw %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
+  upper <- toupper(raw)
+  upper_compact <- gsub("[^A-Z0-9]+", "", upper)
+
+  out <- sub("_output$", "", raw, ignore.case = TRUE)
+  out[!is.na(upper) &
+        grepl("^FAIR(_OUTPUT)?$|^FAIR\\b|FAIR618|EMORY UNIVERSITY HOSPITAL|\\bEUH\\b", upper)] <-
+    "Emory University Hospital"
+  out[!is.na(upper_compact) & grepl("^ARRRRG(V?2|20)?", upper_compact)] <-
+    "Emory University Hospital"
+  out[!is.na(upper) & grepl("EMORY LONG TERM|LONG TERM ACUTE|ELTAC", upper)] <- "ELTAC"
+  out[!is.na(upper) & grepl("A\\.?G\\.? RHODES|AG RHODES|A G RHODES", upper)] <- "A.G. Rhodes"
+  out
+}
+
 canonical_flow_study <- function(study) {
   raw <- trimws(as.character(study))
   raw[raw %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
@@ -828,6 +853,19 @@ canonical_flow_study <- function(study) {
   out[!is.na(upper) & grepl("FAIR618|\\bFAIR\\b|FAIR_OUTPUT", upper)] <- "FAIR"
   out[!is.na(upper_compact) & grepl("^ARRRRG(V?2|20)?", upper_compact)] <- "ARRRRG"
   out[!is.na(upper) & grepl("\\bARG\\b", upper)] <- "ARRRRG"
+  out
+}
+
+canonical_flow_parent <- function(parent_type) {
+  raw <- trimws(as.character(parent_type))
+  raw[raw %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
+  upper <- toupper(raw)
+
+  out <- raw
+  out[!is.na(upper) & upper == "CRYOPRESERVED CELLS"] <- "Isolates"
+  out[!is.na(upper) &
+        grepl("ENVIRONMENT", upper) &
+        grepl("SPONGE|SPONGE STICK", upper)] <- "Environmental Sponge"
   out
 }
 
@@ -997,14 +1035,7 @@ display_flow_site <- function(site_label, project_id = NULL, cp_short_title = NU
     dplyr::na_if(trimws(as.character(project_id)), ""),
     dplyr::na_if(trimws(as.character(cp_short_title)), "")
   )
-  upper <- toupper(raw)
-
-  out <- raw
-  out[!is.na(upper) & grepl("^FAIR(_OUTPUT)?$|^FAIR\\b|FAIR618", upper)] <- "Emory University Hospital"
-  out[!is.na(upper) & grepl("EMORY LONG TERM|LONG TERM ACUTE|ELTAC", upper)] <- "ELTAC"
-  out[!is.na(upper) & grepl("A\\.?G\\.? RHODES|AG RHODES|A G RHODES", upper)] <- "A.G. Rhodes"
-  out <- sub("_output$", "", out, ignore.case = TRUE)
-  out
+  canonical_flow_site(raw)
 }
 
 display_flow_study <- function(participant_id, parsed_subject, lab_id,
@@ -1041,10 +1072,7 @@ display_flow_study <- function(participant_id, parsed_subject, lab_id,
 }
 
 display_flow_parent <- function(parent_type) {
-  x <- trimws(as.character(parent_type))
-  x[x %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
-  x[!is.na(x) & toupper(x) == "CRYOPRESERVED CELLS"] <- "Isolates"
-  x
+  canonical_flow_parent(parent_type)
 }
 
 normalize_flow_mdro <- function(x, os_mdro = NULL, disagree = NULL) {
