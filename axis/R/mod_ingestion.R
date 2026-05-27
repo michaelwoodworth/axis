@@ -41,8 +41,27 @@ ingestionUI <- function(id) {
       .ing-scroll { flex:1; overflow-y:auto; padding:20px 28px 24px; }
       .ing-footer {
         background:%s; border-top:1px solid %s;
-        padding:13px 28px; display:flex; align-items:center; gap:12px;
+        padding:13px 28px; display:flex; flex-direction:column;
+        align-items:stretch; gap:8px;
         flex-shrink:0;
+      }
+      .ing-footer-top {
+        display:flex; align-items:center; gap:12px;
+      }
+      .ing-export-grid {
+        display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px;
+      }
+      .ing-export-row {
+        display:grid; grid-template-columns:minmax(0, 1fr) auto;
+        align-items:end; gap:8px;
+      }
+      .ing-export-label {
+        font-size:10px; font-weight:600; color:%s;
+        letter-spacing:0.5px; text-transform:uppercase; margin-bottom:3px;
+      }
+      .ing-export-row .form-group,
+      .ing-export-row .shiny-input-container {
+        margin-bottom:0 !important;
       }
       .ing-panel {
         background:%s; border:1px solid %s;
@@ -113,7 +132,7 @@ ingestionUI <- function(id) {
         font-size:11.5px; line-height:1.45; color:%s; max-width:170px;
       }
     ",
-    .AX$card,   .AX$border,   # footer
+    .AX$card,   .AX$border, .AX$muted,  # footer
     .AX$card,   .AX$border,   # ing-panel
     .AX$border,               # ing-panel-hd
     .AX$card,   .AX$border,   # bucket-col
@@ -269,20 +288,7 @@ ingestionUI <- function(id) {
               class = "ing-merge-note",
               "Parse Vitek2 and OpenSpecimen files first, then run candidate linkage."
             ),
-            uiOutput(ns("merge_ready_status")),
-            tags$div(
-              style = "width:100%; margin-top:8px; text-align:left;",
-              tags$div(
-                style = sprintf(
-                  "font-size:10px; color:%s; font-weight:600;
-                   letter-spacing:0.5px; text-transform:uppercase;
-                   margin-bottom:4px;",
-                  .AX$muted
-                ),
-                "Cleaned CSV path"
-              ),
-              uiOutput(ns("cleaned_csv_path_control"))
-            )
+            uiOutput(ns("merge_ready_status"))
           )
         ),
 
@@ -391,15 +397,41 @@ ingestionUI <- function(id) {
 
     # ── Sticky footer ─────────────────────────────────────────────────────────
     tags$div(class = "ing-footer",
-      uiOutput(ns("footer_status"), inline = TRUE),
-      tags$div(style = "flex:1;"),
-      actionButton(ns("commit_matched"), "Commit matched only",
-                   class = "btn btn-sm btn-outline-secondary"),
-      actionButton(
-        ns("open_review"), "Open review queue →",
-        class = "btn btn-sm btn-primary",
-        style = sprintf("background:%s; border-color:%s;",
-                        .AX$primary, .AX$primary)
+      tags$div(class = "ing-footer-top",
+        uiOutput(ns("footer_status"), inline = TRUE),
+        tags$div(style = "flex:1;"),
+        actionButton(
+          ns("open_review"), "Open review queue →",
+          class = "btn btn-sm btn-primary",
+          style = sprintf("background:%s; border-color:%s;",
+                          .AX$primary, .AX$primary)
+        )
+      ),
+      tags$div(class = "ing-export-grid",
+        tags$div(class = "ing-export-row",
+          tags$div(
+            tags$div(class = "ing-export-label", "Cleaned CSV path"),
+            uiOutput(ns("cleaned_csv_path_control"))
+          ),
+          actionButton(ns("commit_matched"), "Commit matched only",
+                       class = "btn btn-sm btn-outline-secondary")
+        ),
+        tags$div(class = "ing-export-row",
+          tags$div(
+            tags$div(class = "ing-export-label", "Needs review CSV path"),
+            uiOutput(ns("review_csv_path_control"))
+          ),
+          actionButton(ns("write_review_csv"), "Write Needs review CSV",
+                       class = "btn btn-sm btn-outline-secondary")
+        ),
+        tags$div(class = "ing-export-row",
+          tags$div(
+            tags$div(class = "ing-export-label", "No match CSV path"),
+            uiOutput(ns("none_csv_path_control"))
+          ),
+          actionButton(ns("write_none_csv"), "Write No match CSV",
+                       class = "btn btn-sm btn-outline-secondary")
+        )
       )
     )
   )
@@ -536,9 +568,28 @@ ingestionServer <- function(id, app_state) {
       file.path("data", "exports", paste0("AXIS_clean_", slug, "_links.csv"))
     }
 
+    default_flagged_csv_path <- function(kind, batch_id = rv$batch_id) {
+      slug <- gsub("[^A-Za-z0-9_-]+", "_", batch_id %||% "B")
+      file.path("data", "exports", paste0("AXIS_", kind, "_", slug, ".csv"))
+    }
+
+    normalize_csv_path <- function(path, fallback) {
+      path <- trimws(path %||% "")
+      if (!nzchar(path)) path <- fallback
+      if (!grepl("\\.csv$", path, ignore.case = TRUE)) path <- paste0(path, ".csv")
+      path
+    }
+
     cleaned_csv_path <- reactive({
-      path <- trimws(input$cleaned_csv_path %||% "")
-      if (nzchar(path)) path else default_cleaned_csv_path()
+      normalize_csv_path(input$cleaned_csv_path, default_cleaned_csv_path())
+    })
+
+    review_csv_path <- reactive({
+      normalize_csv_path(input$review_csv_path, default_flagged_csv_path("needs_review"))
+    })
+
+    none_csv_path <- reactive({
+      normalize_csv_path(input$none_csv_path, default_flagged_csv_path("no_match"))
     })
 
     merge_ready <- reactive({
@@ -660,6 +711,77 @@ ingestionServer <- function(id, app_state) {
           duration = 10
         )
         warning("AXIS commit_matched failed: ", e$message)
+      })
+    })
+
+    write_flagged_csv <- function(tbl, path, empty_msg) {
+      if (is.null(tbl) || nrow(tbl) == 0L) {
+        showNotification(empty_msg, type = "warning")
+        return(invisible(NULL))
+      }
+      dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+      readr::write_csv(.exportable_df(tbl), path, na = "")
+      showNotification(
+        sprintf("Wrote %s rows to %s.", format(nrow(tbl), big.mark = ","), path),
+        type = "message",
+        duration = 6
+      )
+      invisible(path)
+    }
+
+    observeEvent(input$write_review_csv, {
+      tryCatch({
+        if (is.null(rv$buckets)) {
+          showNotification("Run automerge before writing Needs review CSV.", type = "warning")
+          return(invisible(NULL))
+        }
+        review <- rv$buckets$review
+        if (!is.null(review) && nrow(review) > 0L) {
+          review <- review |>
+            dplyr::group_by(lab_id, isolate_number) |>
+            dplyr::arrange(dplyr::desc(score), .by_group = TRUE) |>
+            dplyr::mutate(
+              flag_status = "needs_review",
+              candidate_rank = dplyr::row_number(),
+              batch_id = rv$batch_id
+            ) |>
+            dplyr::ungroup()
+        }
+        write_flagged_csv(
+          tbl = review,
+          path = review_csv_path(),
+          empty_msg = "No Needs review candidates to write."
+        )
+      }, error = function(e) {
+        showNotification(paste("Needs review CSV export failed:", e$message),
+                         type = "error", duration = 10)
+        warning("AXIS write_review_csv failed: ", e$message)
+      })
+    })
+
+    observeEvent(input$write_none_csv, {
+      tryCatch({
+        if (is.null(rv$buckets)) {
+          showNotification("Run automerge before writing No match CSV.", type = "warning")
+          return(invisible(NULL))
+        }
+        none <- rv$buckets$none
+        if (!is.null(none) && nrow(none) > 0L) {
+          none <- none |>
+            dplyr::mutate(
+              flag_status = "no_match",
+              batch_id = rv$batch_id
+            )
+        }
+        write_flagged_csv(
+          tbl = none,
+          path = none_csv_path(),
+          empty_msg = "No No match rows to write."
+        )
+      }, error = function(e) {
+        showNotification(paste("No match CSV export failed:", e$message),
+                         type = "error", duration = 10)
+        warning("AXIS write_none_csv failed: ", e$message)
       })
     })
 
@@ -793,6 +915,26 @@ ingestionServer <- function(id, app_state) {
       )
     })
 
+    output$review_csv_path_control <- renderUI({
+      textInput(
+        ns("review_csv_path"),
+        label = NULL,
+        value = default_flagged_csv_path("needs_review"),
+        placeholder = "data/exports/AXIS_needs_review_B-YYYYMMDDHHMM.csv",
+        width = "100%"
+      )
+    })
+
+    output$none_csv_path_control <- renderUI({
+      textInput(
+        ns("none_csv_path"),
+        label = NULL,
+        value = default_flagged_csv_path("no_match"),
+        placeholder = "data/exports/AXIS_no_match_B-YYYYMMDDHHMM.csv",
+        width = "100%"
+      )
+    })
+
     # ── Match preview ──────────────────────────────────────────────────────
     output$match_preview_subtitle <- renderUI({
       n_v <- if (!is.null(rv$vitek_unique)) nrow(rv$vitek_unique) else 0
@@ -913,10 +1055,15 @@ ingestionServer <- function(id, app_state) {
       n_m <- if (!is.null(b) && !is.null(b$matched)) nrow(b$matched) else 0L
       n_r <- if (!is.null(b) && !is.null(b$review))
         dplyr::n_distinct(b$review$lab_id) else 0L
+      n_n <- if (!is.null(b) && !is.null(b$none)) nrow(b$none) else 0L
       updateActionButton(session, "commit_matched",
                          label = sprintf("Commit matched only (%d)", n_m))
       updateActionButton(session, "open_review",
                          label = sprintf("Open review queue (%d) →", n_r))
+      updateActionButton(session, "write_review_csv",
+                         label = sprintf("Write Needs review CSV (%d)", n_r))
+      updateActionButton(session, "write_none_csv",
+                         label = sprintf("Write No match CSV (%d)", n_n))
     })
 
   }) # end moduleServer
