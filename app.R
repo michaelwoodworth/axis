@@ -100,26 +100,6 @@ ui <- bslib::page_navbar(
   # bslib::nav_panel("Overview",   overviewUI("overview"),  fillable = FALSE),
   # bslib::nav_panel("Specimens",  specimensUI("specimens"), fillable = FALSE),
 
-  bslib::nav_spacer(),
-
-  # OpenSpecimen connection pill (cosmetic for now)
-  bslib::nav_item(
-    tags$span(
-      tags$span(
-        style = paste(
-          "display:inline-block; width:8px; height:8px;",
-          "border-radius:50%; background:#15803d; margin-right:5px;"
-        )
-      ),
-      "OpenSpecimen · connected",
-      style = paste(
-        "font-size:12px; color:#3b4252;",
-        "background:#e7f3eb; border:1px solid #bbdfc6;",
-        "border-radius:20px; padding:3px 10px;"
-      )
-    )
-  ),
-
   bslib::nav_panel("Settings",   settingsUI("settings")),
 
   # ── Additional head tags ─────────────────────────────────────────────────────
