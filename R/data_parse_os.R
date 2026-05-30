@@ -16,6 +16,8 @@
 #   organism_col — genus/species column (or NULL)
 #   isolate_col  — isolate number column (or NULL)
 #   parent_type_col — parent/source specimen type column (or NULL)
+#   cfu_col / cfu_eb_col / growth_cols / day_col / media_col — optional
+#                  culture fields used by the Culture tab
 #
 # OUTPUT specimens tibble (§4b schema):
 #   os_identifier, specimen_label, cp_short_title,
@@ -48,7 +50,12 @@ CP_FORM_MAP <- list(
     ),
     organism_col = "FAIR#Genus species",
     isolate_col  = "FAIR#Isolate number",
-    parent_type_col = "FAIR#Parent Specimen Type"
+    parent_type_col = "FAIR#Parent Specimen Type",
+    cfu_col      = "FAIR#CFU/mL",
+    cfu_eb_col   = "FAIR#CFU (EB)",
+    growth_cols  = c("FAIR#ESBL Growth", "FAIR#VRE Growth", "FAIR#C. auris Growth"),
+    day_col      = "FAIR#Day",
+    media_col    = "FAIR#Selective Growth Media"
   ),
 
   # REACT Specimen — prefix "REACT Specimen#"
@@ -59,7 +66,12 @@ CP_FORM_MAP <- list(
     mdro_fn      = NULL,
     organism_col = "REACT Specimen#Genus Species",
     isolate_col  = "REACT Specimen#Isolate Number",
-    parent_type_col = "REACT Specimen#Parent Specimen Type"
+    parent_type_col = "REACT Specimen#Parent Specimen Type",
+    cfu_col      = "REACT Specimen#CFU/mL",
+    cfu_eb_col   = NULL,
+    growth_cols  = c("REACT Specimen#ESBL Growth", "REACT Specimen#VRE Growth"),
+    day_col      = "REACT Specimen#REACT Day",
+    media_col    = "REACT Specimen#Selective Media"
   ),
 
   # SNT / reactform — prefix "reactform#"
@@ -70,7 +82,12 @@ CP_FORM_MAP <- list(
     mdro_fn      = NULL,
     organism_col = "reactform#Presumptive Organism",
     isolate_col  = "reactform#Isolate ID",
-    parent_type_col = "reactform#Specimen Type"
+    parent_type_col = "reactform#Specimen Type",
+    cfu_col      = NULL,
+    cfu_eb_col   = NULL,
+    growth_cols  = character(),
+    day_col      = NULL,
+    media_col    = NULL
   )
 )
 
@@ -123,9 +140,43 @@ get_cp_form_map <- function() {
   }
 }
 
+.blankish <- function(x) {
+  x <- trimws(as.character(x))
+  is.na(x) | x %in% c("", "NA", "na", "N/A", "n/a", "NULL", "null")
+}
+
+.resolve_form_col <- function(col_names, preferred, prefix = NULL, pattern = NULL,
+                              exclude = NULL) {
+  if (!is.null(preferred) && preferred %in% col_names) return(preferred)
+  candidates <- col_names
+  if (!is.null(prefix)) candidates <- candidates[startsWith(candidates, prefix)]
+  if (!is.null(pattern)) {
+    candidates <- candidates[grepl(pattern, candidates, ignore.case = TRUE, perl = TRUE)]
+  }
+  if (!is.null(exclude) && length(candidates) > 0) {
+    candidates <- candidates[!grepl(exclude, candidates, ignore.case = TRUE, perl = TRUE)]
+  }
+  if (length(candidates) == 0) return(NULL)
+  candidates[[1]]
+}
+
+.collapse_cols <- function(df, cols) {
+  cols <- cols[cols %in% names(df)]
+  if (length(cols) == 0) return(rep(NA_character_, nrow(df)))
+  apply(df[, cols, drop = FALSE], 1, function(row) {
+    vals <- trimws(as.character(row))
+    vals <- vals[!is.na(vals) & nzchar(vals)]
+    if (length(vals) == 0) NA_character_ else paste(vals, collapse = " | ")
+  })
+}
+
 .truthy <- function(x) {
   x <- trimws(toupper(as.character(x)))
   !is.na(x) & x %in% c("1", "Y", "YES", "TRUE", "T", "POS", "POSITIVE", "GROWTH")
+}
+
+`%||%` <- function(x, y) {
+  if (is.null(x)) y else x
 }
 
 .derive_mdro_from_flags <- function(df, primary_col = NULL, flags = character()) {
@@ -255,6 +306,18 @@ parse_os_specimens <- function(file_path, project_id = NULL) {
         rep(NA_character_, nrow(df))
       }
 
+      custom_day <- if (!is.null(entry$day_col) && entry$day_col %in% col_names) {
+        as.character(df[[entry$day_col]])
+      } else {
+        rep(NA_character_, nrow(df))
+      }
+
+      custom_selective_media <- if (!is.null(entry$media_col) && entry$media_col %in% col_names) {
+        as.character(df[[entry$media_col]])
+      } else {
+        rep(NA_character_, nrow(df))
+      }
+
       # MDRO: prefer mdro_fn, then mdro_col
       custom_mdro <- if (!is.null(entry$mdro_fn)) {
         entry$mdro_fn(df)
@@ -270,14 +333,44 @@ parse_os_specimens <- function(file_path, project_id = NULL) {
         as.list(df[i, custom_cols, drop = FALSE])
       })
 
+      growth_cols <- entry$growth_cols %||% character()
+      growth_cols <- growth_cols[growth_cols %in% col_names]
+      custom_growth_blob <- purrr::map(seq_len(nrow(df)), function(i) {
+        as.list(df[i, growth_cols, drop = FALSE])
+      })
+
+      cfu_col <- .resolve_form_col(
+        col_names,
+        preferred = entry$cfu_col %||% NULL,
+        prefix = form$prefix,
+        pattern = "CFU",
+        exclude = "\\bEB\\b|\\(EB\\)"
+      )
+      cfu_eb_col <- .resolve_form_col(
+        col_names,
+        preferred = entry$cfu_eb_col %||% NULL,
+        prefix = form$prefix,
+        pattern = "CFU.*EB|EB.*CFU|CFU \\(EB\\)"
+      )
+
+      cfu_primary <- if (!is.null(cfu_col)) as.character(df[[cfu_col]]) else rep(NA_character_, nrow(df))
+      cfu_eb <- if (!is.null(cfu_eb_col)) as.character(df[[cfu_eb_col]]) else rep(NA_character_, nrow(df))
+      cfu_raw <- dplyr::if_else(.blankish(cfu_primary), cfu_eb, cfu_primary)
+      growth_flag <- .collapse_cols(df, unique(c(growth_cols, cfu_eb_col)))
+      cfu_norm <- parse_cfu(cfu_raw, growth_flag = growth_flag)
+
     } else {
       # No recognised form prefix
       participant_id         <- rep(NA_character_, nrow(df))
       custom_collection_date <- as.Date(collection_dt)
       custom_organism        <- rep(NA_character_, nrow(df))
       custom_parent_specimen_type <- rep(NA_character_, nrow(df))
+      custom_day             <- rep(NA_character_, nrow(df))
+      custom_selective_media <- rep(NA_character_, nrow(df))
       custom_mdro            <- rep(NA_character_, nrow(df))
       custom_blob            <- vector("list", nrow(df))
+      custom_growth_blob     <- vector("list", nrow(df))
+      cfu_norm               <- parse_cfu(rep(NA_character_, nrow(df)))
     }
 
     result <- tibble::tibble(
@@ -303,7 +396,19 @@ parse_os_specimens <- function(file_path, project_id = NULL) {
       custom_collection_date = custom_collection_date,
       custom_organism        = custom_organism,
       custom_parent_specimen_type = custom_parent_specimen_type,
+      custom_day             = custom_day,
+      custom_selective_media = custom_selective_media,
+      custom_growth_blob     = custom_growth_blob,
       custom_mdro            = custom_mdro,
+      cfu_raw                = cfu_norm$cfu_raw,
+      cfu_log10              = cfu_norm$cfu_log10,
+      cfu_value              = cfu_norm$cfu_value,
+      cfu_unit               = cfu_norm$cfu_unit,
+      cfu_censored           = cfu_norm$cfu_censored,
+      growth_method          = cfu_norm$growth_method,
+      is_pseudocount         = cfu_norm$is_pseudocount,
+      cfu_flag               = cfu_norm$cfu_flag,
+      has_quant              = !is.na(cfu_norm$cfu_log10) | cfu_norm$is_pseudocount,
       custom_form_blob       = custom_blob
     ) |>
       dplyr::filter(
@@ -410,7 +515,19 @@ specimens_empty <- function() {
     custom_collection_date = as.Date(character()),
     custom_organism        = character(),
     custom_parent_specimen_type = character(),
+    custom_day             = character(),
+    custom_selective_media = character(),
+    custom_growth_blob     = list(),
     custom_mdro            = character(),
+    cfu_raw                = character(),
+    cfu_log10              = double(),
+    cfu_value              = double(),
+    cfu_unit               = character(),
+    cfu_censored           = logical(),
+    growth_method          = character(),
+    is_pseudocount         = logical(),
+    cfu_flag               = character(),
+    has_quant              = logical(),
     custom_form_blob       = list()
   )
 }

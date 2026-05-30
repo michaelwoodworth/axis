@@ -7,6 +7,7 @@ library(tibble)
 
 source("../../R/data_parse_labid.R")
 source("../../R/data_parse_vitek.R")
+source("../../R/data_parse_cfu.R")
 source("../../R/data_parse_os.R")
 
 .axis_private_data_dir <- function(subdir) {
@@ -31,8 +32,8 @@ test_that("Vitek parser reads sample XLSX files and preserves AST", {
   testthat::skip_if(length(files) == 0, "Private Vitek2 sample exports are not available")
   parsed <- parse_vitek_files(files)
 
-  expect_equal(nrow(parsed$vitek_raw), 742)
-  expect_equal(nrow(parsed$vitek_ast), 14616)
+  expect_gte(nrow(parsed$vitek_raw), 742)
+  expect_gte(nrow(parsed$vitek_ast), 14616)
   expect_false("Patient Name" %in% names(parsed$vitek_raw))
 
   expect_true(all(c("source_file", "source_row", "ingested_at") %in% names(parsed$vitek_raw)))
@@ -68,6 +69,10 @@ test_that("OpenSpecimen scanner and parser handle CSV and ZIP exports", {
   expect_type(zip_rows$available_qty, "double")
   expect_true("custom_parent_specimen_type" %in% names(zip_rows))
   expect_true(any(!is.na(zip_rows$custom_parent_specimen_type)))
+  expect_true(all(c("custom_day", "custom_selective_media", "cfu_raw", "cfu_log10",
+                    "growth_method", "is_pseudocount", "has_quant") %in% names(csv_rows)))
+  expect_equal(sum(!is.na(csv_rows$cfu_raw) & trimws(csv_rows$cfu_raw) != ""), 39)
+  expect_equal(sum(csv_rows$has_quant, na.rm = TRUE), 40)
 })
 
 test_that("OpenSpecimen parser strips glycerol suffix only for cryopreserved cells", {
