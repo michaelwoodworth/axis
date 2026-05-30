@@ -157,17 +157,62 @@ init_db_schema <- function(conn) {
       custom_collection_date DATE,
       custom_organism        VARCHAR,
       custom_parent_specimen_type VARCHAR,
+      custom_day             VARCHAR,
+      custom_selective_media VARCHAR,
+      custom_growth_blob     VARCHAR,
       custom_mdro            VARCHAR,
+      cfu_raw                VARCHAR,
+      cfu_log10              DOUBLE,
+      cfu_value              DOUBLE,
+      cfu_unit               VARCHAR,
+      cfu_censored           BOOLEAN,
+      growth_method          VARCHAR,
+      is_pseudocount         BOOLEAN,
+      cfu_flag               VARCHAR,
+      has_quant              BOOLEAN,
       custom_form_blob       VARCHAR
     )
   ")
 
-  DBI::dbExecute(conn, "
-    ALTER TABLE specimens ADD COLUMN IF NOT EXISTS specimen_label_raw VARCHAR
-  ")
-  DBI::dbExecute(conn, "
-    ALTER TABLE specimens ADD COLUMN IF NOT EXISTS custom_parent_specimen_type VARCHAR
-  ")
+  .ensure_db_columns(conn, "specimens", c(
+    batch_id               = "VARCHAR",
+    source_file            = "VARCHAR",
+    source_row             = "INTEGER",
+    project_id             = "VARCHAR",
+    os_identifier          = "VARCHAR",
+    specimen_label_raw     = "VARCHAR",
+    specimen_label         = "VARCHAR",
+    cp_short_title         = "VARCHAR",
+    class                  = "VARCHAR",
+    type                   = "VARCHAR",
+    lineage                = "VARCHAR",
+    parent_label           = "VARCHAR",
+    collection_dt          = "TIMESTAMP",
+    available_qty          = "DOUBLE",
+    activity_status        = "VARCHAR",
+    location_container     = "VARCHAR",
+    location_row           = "VARCHAR",
+    location_col           = "VARCHAR",
+    location_pos           = "VARCHAR",
+    participant_id         = "VARCHAR",
+    custom_collection_date = "DATE",
+    custom_organism        = "VARCHAR",
+    custom_parent_specimen_type = "VARCHAR",
+    custom_day             = "VARCHAR",
+    custom_selective_media = "VARCHAR",
+    custom_growth_blob     = "VARCHAR",
+    custom_mdro            = "VARCHAR",
+    cfu_raw                = "VARCHAR",
+    cfu_log10              = "DOUBLE",
+    cfu_value              = "DOUBLE",
+    cfu_unit               = "VARCHAR",
+    cfu_censored           = "BOOLEAN",
+    growth_method          = "VARCHAR",
+    is_pseudocount         = "BOOLEAN",
+    cfu_flag               = "VARCHAR",
+    has_quant              = "BOOLEAN",
+    custom_form_blob       = "VARCHAR"
+  ))
 
   invisible(conn)
 }

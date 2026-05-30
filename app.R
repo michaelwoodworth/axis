@@ -48,6 +48,7 @@ shiny::addResourcePath("assets", "inst/assets")
 source("R/store.R")              # open_db(), write_links(), etc.
 source("R/data_parse_labid.R")   # parse_lab_ids(), extract_mdro_target(), rules table
 source("R/data_parse_vitek.R")   # parse_vitek_files(), parse_one_vitek(), etc.
+source("R/data_parse_cfu.R")     # parse_cfu()
 source("R/data_parse_os.R")      # scan_os_projects(), parse_os_specimens*(), specimens_empty()
 source("R/data_dedup.R")         # dedup_vitek(), dedup_summary()
 source("R/data_match.R")         # auto_match(), bucket_results(), etc.
@@ -61,6 +62,7 @@ source("R/mod_overview.R")       # overviewUI()  / overviewServer()
 source("R/mod_inventory.R")      # inventoryUI() / inventoryServer()
 source("R/mod_ingestion.R")      # ingestionUI() / ingestionServer()
 source("R/mod_linking.R")        # linkingUI()   / linkingServer()
+source("R/mod_culture.R")        # cultureUI()   / cultureServer()
 source("R/mod_specimens.R")      # specimensUI() / specimensServer()
 source("R/mod_settings.R")       # settingsUI()  / settingsServer()
 
@@ -94,6 +96,7 @@ ui <- bslib::page_navbar(
   bslib::nav_panel("Ingestion",  ingestionUI("ingestion"), fillable = TRUE),
   bslib::nav_panel("Linking",    linkingUI("linking"),     fillable = FALSE),
   bslib::nav_panel("Inventory",  inventoryUI("inventory"), fillable = FALSE),
+  bslib::nav_panel("Culture",    cultureUI("culture"),     fillable = FALSE),
   # bslib::nav_panel("Overview",   overviewUI("overview"),  fillable = FALSE),
   # bslib::nav_panel("Specimens",  specimensUI("specimens"), fillable = FALSE),
 
@@ -208,6 +211,7 @@ server <- function(input, output, session) {
   inventoryServer("inventory", app_state = app_state)
   ingestionServer("ingestion", app_state = app_state)
   linkingServer("linking",     app_state = app_state)
+  cultureServer("culture",     app_state = app_state)
   specimensServer("specimens", app_state = app_state)
   settingsServer("settings",   app_state = app_state)
 }
