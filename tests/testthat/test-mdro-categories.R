@@ -98,3 +98,35 @@ test_that("OpenSpecimen-only Enterococcus isolates can feed Sankey VRE bins", {
                c("Enterococcus faecalis", "Enterococcus faecium"))
   expect_equal(sort(unique(flow$flow_mdro)), c("Non-MDRO", "VRE"))
 })
+
+test_that("Inventory flow fields use Sankey categories for filter pills", {
+  cleaned <- tibble::tibble(
+    link_id = paste0("L", 1:5),
+    clean_participant_id = c("aEM001", "rEM001", "SNT001", "FR001", "ARG026"),
+    v_parsed_subject = NA_character_,
+    lab_id = c("aEM001", "rEM001", "SNT001", "6180012ESBL1", "ARG026P2CRE1"),
+    v_parsed_study = c("aEM", "aEM", "Unknown", "FAIR618", "ARRRRG"),
+    clean_cp_title = c("SNT/APPS/React", "REACT", "SNT/APPS/React", "FAIR 618", "ARRRRG 2.0"),
+    cp_short_title = c("SNT/APPS/React", "REACT", "SNT/APPS/React", "FAIR 618", "ARRRRG 2.0"),
+    project_id = c("SNT_output", "REACT_output", "SNT_output", "FAIR_output", "ARRRRGv2_output"),
+    clean_parent_specimen_type = c(
+      "Perirectal eSwab", "Cryopreserved Cells", "Environmental Sponge",
+      "Cryopreserved Cells", "Cryopreserved Cells"
+    ),
+    inv_mdro_category = c("VRE", "Non-MDRO", "MDRP", "ESBL", "CRE"),
+    clean_organism = c(
+      "Enterococcus faecium", "Escherichia coli", "Pseudomonas aeruginosa",
+      "Escherichia coli", "Klebsiella pneumoniae"
+    )
+  )
+
+  flow <- add_inventory_flow_fields(cleaned)
+
+  expect_setequal(flow$flow_study, c("APPS", "REACT", "APPS + REACT", "FAIR", "ARRRRG"))
+  expect_true("Isolates" %in% flow$flow_parent)
+  expect_true("VRE" %in% ordered_flow_choices(flow$flow_mdro, "mdro"))
+  expect_equal(
+    ordered_flow_choices(flow$flow_study, "study"),
+    c("APPS", "REACT", "APPS + REACT", "FAIR", "ARRRRG")
+  )
+})
