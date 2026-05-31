@@ -934,11 +934,8 @@ ingestionServer <- function(id, app_state) {
       b   <- rv$buckets
       n_v <- if (!is.null(rv$vitek_unique)) nrow(rv$vitek_unique) else 0
       if (is.null(b) || n_v == 0L) return(ui_match_bar(0L, 0L, 0L, 1L))
-      n_m <- if (!is.null(b$matched)) nrow(b$matched) else 0L
-      n_r <- if (!is.null(b$review) && nrow(b$review) > 0L)
-        dplyr::n_distinct(b$review$lab_id) else 0L
-      n_n <- if (!is.null(b$none)) nrow(b$none) else 0L
-      ui_match_bar(n_m, n_r, n_n, n_v)
+      counts <- match_bucket_counts(b)
+      ui_match_bar(counts$matched, counts$review, counts$none, n_v)
     })
 
     output$project_match_breakdowns <- renderUI({
@@ -973,8 +970,8 @@ ingestionServer <- function(id, app_state) {
                  paste0(round(score), "%"))
           })
       } else list()
-      n_matched <- if (!is.null(b) && !is.null(b$matched)) nrow(b$matched) else 0L
-      ui_bucket_col("Matched", n_matched,
+      counts <- match_bucket_counts(b)
+      ui_bucket_col("Matched", counts$matched,
                     "will commit on confirm",
                     .AX$ok, .AX$okSoft, rows, FALSE)
     })
@@ -1000,8 +997,8 @@ ingestionServer <- function(id, app_state) {
                  paste0(round(top_score), "%"))
           })
       } else list()
-      n_review <- if (!is.null(b) && !is.null(b$review))
-        dplyr::n_distinct(b$review$lab_id) else 0L
+      counts <- match_bucket_counts(b)
+      n_review <- counts$review
       ui_bucket_col("Needs review", n_review,
                     "low confidence · pick a candidate",
                     .AX$warn, .AX$warnSoft, rows, TRUE)
@@ -1018,8 +1015,9 @@ ingestionServer <- function(id, app_state) {
                  "—")
           })
       } else list()
+      counts <- match_bucket_counts(b)
       ui_bucket_col("No match",
-                    if (!is.null(b) && !is.null(b$none)) nrow(b$none) else 0L,
+                    counts$none,
                     "not in any selected project",
                     .AX$err, .AX$errSoft, rows, FALSE)
     })
@@ -1037,10 +1035,10 @@ ingestionServer <- function(id, app_state) {
 
     observe({
       b   <- rv$buckets
-      n_m <- if (!is.null(b) && !is.null(b$matched)) nrow(b$matched) else 0L
-      n_r <- if (!is.null(b) && !is.null(b$review))
-        dplyr::n_distinct(b$review$lab_id) else 0L
-      n_n <- if (!is.null(b) && !is.null(b$none)) nrow(b$none) else 0L
+      counts <- match_bucket_counts(b)
+      n_m <- counts$matched
+      n_r <- counts$review
+      n_n <- counts$none
       updateActionButton(session, "commit_matched",
                          label = sprintf("Commit matched only (%d)", n_m))
       updateActionButton(session, "open_review",
