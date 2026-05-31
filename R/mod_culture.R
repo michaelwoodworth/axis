@@ -69,6 +69,10 @@ cultureUI <- function(id) {
       .cul-kpi-label { font-size:10.5px; color:#6b7280; font-weight:700; text-transform:uppercase; letter-spacing:.45px; }
       .cul-kpi-value { font-family:'IBM Plex Mono',monospace; color:#1f3a5f; font-size:22px; font-weight:700; line-height:1.15; }
       .cul-kpi-sub { color:#6b7280; font-size:11px; }
+      .cul-export-row { display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:10px; }
+      .cul-export { background:#fff; border:1px solid #e8e6e0; border-radius:8px; padding:12px;
+        display:flex; align-items:center; justify-content:space-between; gap:12px; }
+      .cul-export-path { min-width:0; color:#6b7280; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .cul-card { background:#fff; border:1px solid #e8e6e0; border-radius:10px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,.05); }
       .cul-card-title { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.6px; color:#6b7280; margin-bottom:10px; }
       .cul-rail-list { display:flex; flex-direction:column; gap:6px; max-height:330px; overflow:auto; }
@@ -100,6 +104,25 @@ cultureUI <- function(id) {
         .cul_kpi(ns("kpi_median"), "Median CFU/mL", ns("kpi_median_sub")),
         .cul_kpi(ns("kpi_eb"), "EB-only", ns("kpi_eb_sub")),
         .cul_kpi(ns("kpi_flagged"), "Flagged for review", ns("kpi_flagged_sub"))
+      ),
+      shiny::div(
+        class = "cul-export-row",
+        shiny::div(
+          class = "cul-export",
+          shiny::div(
+            shiny::div(class = "cul-card-title", "Review CSV"),
+            shiny::div(class = "cul-export-path", shiny::textOutput(ns("review_export_path"), inline = TRUE))
+          ),
+          shiny::actionButton(ns("export_review_csv"), "Export review CSV", class = "btn btn-outline-primary btn-sm")
+        ),
+        shiny::div(
+          class = "cul-export",
+          shiny::div(
+            shiny::div(class = "cul-card-title", "Summary CSV"),
+            shiny::div(class = "cul-export-path", shiny::textOutput(ns("summary_export_path"), inline = TRUE))
+          ),
+          shiny::actionButton(ns("export_summary_csv"), "Export summary CSV", class = "btn btn-outline-primary btn-sm")
+        )
       ),
       shiny::div(
         class = "cul-grid",
@@ -147,6 +170,8 @@ cultureServer <- function(id, app_state) {
     ns <- session$ns
     selected_participant <- shiny::reactiveVal(NULL)
     selected_timepoint <- shiny::reactiveVal(NULL)
+    last_review_export <- shiny::reactiveVal("Not exported yet")
+    last_summary_export <- shiny::reactiveVal("Not exported yet")
 
     base_data <- shiny::reactive(.culture_specimens(app_state))
 
@@ -168,6 +193,53 @@ cultureServer <- function(id, app_state) {
       if (length(input$unit)) dat <- dplyr::filter(dat, .data$cfu_unit %in% input$unit)
       if (!isTRUE(input$include_eb)) dat <- dplyr::filter(dat, .data$growth_method != "EB" | is.na(.data$growth_method))
       dat
+    })
+
+    culture_batch_id <- function() {
+      app_state$batch_id %||% format(Sys.time(), "%Y%m%d%H%M%S")
+    }
+
+    output$review_export_path <- shiny::renderText(last_review_export())
+    output$summary_export_path <- shiny::renderText(last_summary_export())
+
+    shiny::observeEvent(input$export_review_csv, {
+      tryCatch({
+        info <- write_cfu_review_csv(
+          filtered_data(),
+          batch_id = culture_batch_id(),
+          output_dir = file.path("data", "exports")
+        )
+        last_review_export(info$path)
+        shiny::showNotification(
+          sprintf("Wrote %s CFU review rows to %s.", format(info$n, big.mark = ","), info$path),
+          type = "message",
+          duration = 6
+        )
+      }, error = function(e) {
+        shiny::showNotification(paste("CFU review CSV export failed:", e$message),
+                                type = "error", duration = 10)
+        warning("AXIS export_review_csv failed: ", e$message)
+      })
+    })
+
+    shiny::observeEvent(input$export_summary_csv, {
+      tryCatch({
+        info <- write_cfu_summary_csv(
+          filtered_data(),
+          batch_id = culture_batch_id(),
+          output_dir = file.path("data", "exports")
+        )
+        last_summary_export(info$path)
+        shiny::showNotification(
+          sprintf("Wrote %s CFU summary rows to %s.", format(info$n, big.mark = ","), info$path),
+          type = "message",
+          duration = 6
+        )
+      }, error = function(e) {
+        shiny::showNotification(paste("CFU summary CSV export failed:", e$message),
+                                type = "error", duration = 10)
+        warning("AXIS export_summary_csv failed: ", e$message)
+      })
     })
 
     shiny::observe({
