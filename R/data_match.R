@@ -118,7 +118,9 @@
 #' @return match_candidates tibble (all candidate pairs ≥ thresh_review).
 auto_match <- function(vitek_unique, specimens,
                        thresh_auto   = 80,
-                       thresh_review = 50) {
+                       thresh_review = 50,
+                       parallel = getOption("axis.match_parallel", TRUE),
+                       workers = getOption("axis.match_workers", NULL)) {
 
   if (is.null(vitek_unique) || nrow(vitek_unique) == 0 ||
       is.null(specimens)    || nrow(specimens)    == 0)
@@ -137,153 +139,30 @@ auto_match <- function(vitek_unique, specimens,
   specimens <- .ensure_col(specimens, "cp_short_title",         NA_character_)
   specimens <- .ensure_col(specimens, "custom_organism",        NA_character_)
   specimens <- .ensure_col(specimens, "type",                   NA_character_)
+  specimens <- .prepare_match_specimens(specimens)
 
-  # Score all pairs using vectorized cross-join
-  results <- purrr::map_dfr(seq_len(nrow(vitek_unique)), function(vi) {
-    vrow <- vitek_unique[vi, ]
+  # Score all pairs using vectorized per-isolate scoring. Specimen-side
+  # normalized fields are precomputed once above; large jobs can split isolate
+  # scoring across local cores on Unix-like systems.
+  idx <- seq_len(nrow(vitek_unique))
+  use_parallel <- isTRUE(parallel) &&
+    .Platform$OS.type != "windows" &&
+    length(idx) > 1L
+  if (is.null(workers)) {
+    workers <- max(1L, parallel::detectCores(logical = TRUE) - 1L)
+  }
+  workers <- max(1L, min(as.integer(workers), length(idx)))
 
-    # Restrict candidate specimens:
-    # If cp_hint is set, prefer specimens from that CP; always include all
-    # as fallback so we don't miss cross-CP matches at lower scores.
-    cands <- specimens
-
-    if (!is.na(vrow$cp_hint) && nchar(trimws(vrow$cp_hint)) > 0) {
-      cp_match <- grepl(vrow$cp_hint, cands$cp_short_title,
-                        ignore.case = TRUE, fixed = FALSE)
-      # If any CP-hint matches exist, restrict to those; otherwise keep all
-      if (any(cp_match, na.rm = TRUE)) cands <- cands[cp_match, ]
-    }
-
-    cryo_match <- trimws(as.character(cands$type)) == "Cryopreserved Cells"
-    if (any(cryo_match, na.rm = TRUE)) cands <- cands[cryo_match, ]
-
-    if (nrow(cands) == 0) return(NULL)
-
-    # ── Signal 1: Label match (0–60) ─────────────────────────────────────
-    lid    <- trimws(as.character(vrow$lab_id))
-    slabel <- trimws(as.character(cands$specimen_label))
-    lid_match    <- .norm_accession_label(lid)
-    slabel_match <- .norm_accession_label(slabel)
-
-    label_substring <- mapply(function(a, b) {
-      if (is.na(a) || is.na(b) || nchar(a) < 6 || nchar(b) < 6) return(FALSE)
-      grepl(a, b, fixed = TRUE) || grepl(b, a, fixed = TRUE)
-    }, lid_match, slabel_match)
-
-    label_score <- dplyr::case_when(
-      is.na(slabel_match) | slabel_match == "" ~  0L,
-      lid_match == slabel_match                ~ 60L,
-      # lab_id is a substring of specimen_label (e.g., "6180011" in "6180011ESBL1")
-      label_substring                          ~ 45L,
-      TRUE                                     ~  0L
+  pieces <- if (use_parallel && workers > 1L) {
+    parallel::mclapply(
+      idx,
+      function(vi) .score_one_vitek(vitek_unique[vi, ], specimens),
+      mc.cores = workers
     )
-
-    # ── Signal 2: Subject match (0–35) ───────────────────────────────────
-    vsub  <- trimws(as.character(vrow$parsed_subject))
-    spid  <- trimws(as.character(cands$participant_id))
-    vsub_match <- .norm_accession_label(vsub)
-    spid_match <- .norm_accession_label(spid)
-
-    subject_score <- dplyr::case_when(
-      is.na(vsub_match) | vsub_match == "" | vsub_match == "NA" |
-        is.na(spid_match) | spid_match == "" | spid_match == "NA"  ~  7L,   # unknown → neutral
-      vsub_match == spid_match                                 ~ 35L,
-      # Prefix match (≥ 4 chars): e.g., "ARG026" vs "ARG026ESBL"
-      nchar(vsub_match) >= 4 & nchar(spid_match) >= 4 &
-        (startsWith(spid_match, vsub_match) | startsWith(vsub_match, spid_match)) ~ 20L,
-      TRUE                                         ~  0L
-    )
-
-    # ── Signal 3: MDRO target match (0–15) ───────────────────────────────
-    vtarget <- .norm_mdro(vrow$parsed_target)
-    smdro   <- .norm_mdro(cands$custom_mdro)
-
-    mdro_score <- dplyr::case_when(
-      is.na(vtarget) | is.na(smdro) ~  5L,   # unknown → neutral
-      vtarget == smdro              ~ 15L,
-      TRUE                          ~  0L
-    )
-
-    # MDRO disagreement flag
-    mdro_disagree <- !is.na(vtarget) & !is.na(smdro) & vtarget != smdro
-
-    # ── Signal 4: Organism match (0–10) ──────────────────────────────────
-    vorg <- .norm_organism(vrow$organism_name)
-    sorg <- .norm_organism(cands$custom_organism)
-
-    organism_score <- dplyr::case_when(
-      is.na(vorg) | is.na(sorg) ~ 3L,
-      toupper(vorg) == toupper(sorg) ~ 10L,
-      .organism_genus(vorg) != "" & .organism_genus(vorg) == .organism_genus(sorg) ~ 5L,
-      TRUE ~ 0L
-    )
-
-    organism_disagree <- !is.na(vorg) & !is.na(sorg) &
-      toupper(vorg) != toupper(sorg)
-
-    # ── Signal 5: Date proximity (0–10) ──────────────────────────────────
-    vdate <- vrow$testing_date
-    sdate <- cands$custom_collection_date
-
-    date_diff <- suppressWarnings(abs(as.numeric(difftime(vdate, sdate, units = "days"))))
-    date_score <- dplyr::case_when(
-      is.na(date_diff)  ~  4L,    # unknown → neutral
-      date_diff == 0    ~ 10L,
-      date_diff <= 1    ~  8L,
-      date_diff <= 3    ~  5L,
-      date_diff <= 7    ~  2L,
-      TRUE              ~  0L
-    )
-
-    # ── Signal 6: CP hint match (0–5) ────────────────────────────────────
-    cp_hint_val <- trimws(as.character(vrow$cp_hint))
-    scp         <- trimws(as.character(cands$cp_short_title))
-
-    cp_overlap <- mapply(function(hint, cp) {
-      if (is.na(hint) || hint == "" || is.na(cp) || cp == "") return(FALSE)
-      grepl(hint, cp, ignore.case = TRUE) || grepl(cp, hint, ignore.case = TRUE)
-    }, cp_hint_val, scp)
-
-    cp_score <- dplyr::case_when(
-      is.na(cp_hint_val) | cp_hint_val == "" |
-        is.na(scp)       | scp == ""         ~  2L,   # unknown → neutral
-      cp_overlap                              ~ 5L,
-      TRUE                                    ~  0L
-    )
-
-    # ── Signal 7: Specimen type (0–10) ───────────────────────────────────
-    cryo_score <- dplyr::if_else(
-      trimws(as.character(cands$type)) == "Cryopreserved Cells",
-      10L,
-      0L,
-      missing = 0L
-    )
-
-    # ── Composite score ───────────────────────────────────────────────────
-    score <- pmin(100L, as.integer(label_score + subject_score +
-                                     mdro_score + organism_score +
-                                     date_score + cp_score + cryo_score))
-
-    tibble::tibble(
-      lab_id            = vrow$lab_id,
-      isolate_number    = vrow$isolate_number,
-      os_identifier     = cands$os_identifier,
-      project_id        = cands$project_id,
-      specimen_label    = cands$specimen_label,
-      cp_short_title    = cands$cp_short_title,
-      score             = score,
-      label_score       = label_score,
-      subject_score     = subject_score,
-      mdro_score        = mdro_score,
-      organism_score    = organism_score,
-      date_score        = date_score,
-      cp_score          = cp_score,
-      cryo_score        = cryo_score,
-      date_diff_days    = date_diff,
-      mdro_disagree     = mdro_disagree,
-      organism_disagree = organism_disagree
-    )
-  })
+  } else {
+    lapply(idx, function(vi) .score_one_vitek(vitek_unique[vi, ], specimens))
+  }
+  results <- dplyr::bind_rows(pieces)
 
   if (is.null(results) || nrow(results) == 0) return(match_candidates_empty())
 
@@ -417,6 +296,153 @@ match_candidates_empty <- function() {
 .ensure_col <- function(df, col, default) {
   if (!col %in% names(df)) df[[col]] <- rep(default, nrow(df))
   df
+}
+
+.prepare_match_specimens <- function(specimens) {
+  specimens |>
+    dplyr::mutate(
+      .axis_specimen_label_norm = .norm_accession_label(.data$specimen_label),
+      .axis_participant_norm = .norm_accession_label(.data$participant_id),
+      .axis_mdro_norm = .norm_mdro(.data$custom_mdro),
+      .axis_organism_norm = .norm_organism(.data$custom_organism),
+      .axis_organism_upper = toupper(.data$.axis_organism_norm),
+      .axis_organism_genus = .organism_genus(.data$.axis_organism_norm),
+      .axis_type_trim = trimws(as.character(.data$type)),
+      .axis_cp_title_trim = trimws(as.character(.data$cp_short_title))
+    )
+}
+
+.score_one_vitek <- function(vrow, specimens) {
+  # Restrict candidate specimens:
+  # If cp_hint is set, prefer specimens from that CP; always include all as
+  # fallback so we don't miss cross-CP matches at lower scores.
+  cands <- specimens
+
+  if (!is.na(vrow$cp_hint) && nchar(trimws(vrow$cp_hint)) > 0) {
+    cp_match <- grepl(vrow$cp_hint, cands$cp_short_title,
+                      ignore.case = TRUE, fixed = FALSE)
+    if (any(cp_match, na.rm = TRUE)) cands <- cands[cp_match, ]
+  }
+
+  cryo_match <- cands$.axis_type_trim == "Cryopreserved Cells"
+  if (any(cryo_match, na.rm = TRUE)) cands <- cands[cryo_match, ]
+
+  if (nrow(cands) == 0) return(NULL)
+
+  # ── Signal 1: Label match (0–60) ─────────────────────────────────────
+  lid_match <- .norm_accession_label(vrow$lab_id)
+  slabel_match <- cands$.axis_specimen_label_norm
+
+  label_substring <- mapply(function(a, b) {
+    if (is.na(a) || is.na(b) || nchar(a) < 6 || nchar(b) < 6) return(FALSE)
+    grepl(a, b, fixed = TRUE) || grepl(b, a, fixed = TRUE)
+  }, lid_match, slabel_match)
+
+  label_score <- dplyr::case_when(
+    is.na(slabel_match) | slabel_match == "" ~  0L,
+    lid_match == slabel_match                ~ 60L,
+    label_substring                          ~ 45L,
+    TRUE                                     ~  0L
+  )
+
+  # ── Signal 2: Subject match (0–35) ───────────────────────────────────
+  vsub_match <- .norm_accession_label(vrow$parsed_subject)
+  spid_match <- cands$.axis_participant_norm
+
+  subject_score <- dplyr::case_when(
+    is.na(vsub_match) | vsub_match == "" | vsub_match == "NA" |
+      is.na(spid_match) | spid_match == "" | spid_match == "NA"  ~  7L,
+    vsub_match == spid_match                                 ~ 35L,
+    nchar(vsub_match) >= 4 & nchar(spid_match) >= 4 &
+      (startsWith(spid_match, vsub_match) | startsWith(vsub_match, spid_match)) ~ 20L,
+    TRUE                                         ~  0L
+  )
+
+  # ── Signal 3: MDRO target match (0–15) ───────────────────────────────
+  vtarget <- .norm_mdro(vrow$parsed_target)
+  smdro <- cands$.axis_mdro_norm
+
+  mdro_score <- dplyr::case_when(
+    is.na(vtarget) | is.na(smdro) ~  5L,
+    vtarget == smdro              ~ 15L,
+    TRUE                          ~  0L
+  )
+  mdro_disagree <- !is.na(vtarget) & !is.na(smdro) & vtarget != smdro
+
+  # ── Signal 4: Organism match (0–10) ──────────────────────────────────
+  vorg <- .norm_organism(vrow$organism_name)
+  vorg_upper <- toupper(vorg)
+  vorg_genus <- .organism_genus(vorg)
+  sorg <- cands$.axis_organism_norm
+
+  organism_score <- dplyr::case_when(
+    is.na(vorg) | is.na(sorg) ~ 3L,
+    vorg_upper == cands$.axis_organism_upper ~ 10L,
+    vorg_genus != "" & vorg_genus == cands$.axis_organism_genus ~ 5L,
+    TRUE ~ 0L
+  )
+  organism_disagree <- !is.na(vorg) & !is.na(sorg) &
+    vorg_upper != cands$.axis_organism_upper
+
+  # ── Signal 5: Date proximity (0–10) ──────────────────────────────────
+  vdate <- vrow$testing_date
+  sdate <- cands$custom_collection_date
+  date_diff <- suppressWarnings(abs(as.numeric(difftime(vdate, sdate, units = "days"))))
+  date_score <- dplyr::case_when(
+    is.na(date_diff)  ~  4L,
+    date_diff == 0    ~ 10L,
+    date_diff <= 1    ~  8L,
+    date_diff <= 3    ~  5L,
+    date_diff <= 7    ~  2L,
+    TRUE              ~  0L
+  )
+
+  # ── Signal 6: CP hint match (0–5) ────────────────────────────────────
+  cp_hint_val <- trimws(as.character(vrow$cp_hint))
+  scp <- cands$.axis_cp_title_trim
+  cp_overlap <- mapply(function(hint, cp) {
+    if (is.na(hint) || hint == "" || is.na(cp) || cp == "") return(FALSE)
+    grepl(hint, cp, ignore.case = TRUE) || grepl(cp, hint, ignore.case = TRUE)
+  }, cp_hint_val, scp)
+
+  cp_score <- dplyr::case_when(
+    is.na(cp_hint_val) | cp_hint_val == "" |
+      is.na(scp)       | scp == ""         ~  2L,
+    cp_overlap                              ~ 5L,
+    TRUE                                    ~  0L
+  )
+
+  # ── Signal 7: Specimen type (0–10) ───────────────────────────────────
+  cryo_score <- dplyr::if_else(
+    cands$.axis_type_trim == "Cryopreserved Cells",
+    10L,
+    0L,
+    missing = 0L
+  )
+
+  score <- pmin(100L, as.integer(label_score + subject_score +
+                                   mdro_score + organism_score +
+                                   date_score + cp_score + cryo_score))
+
+  tibble::tibble(
+    lab_id            = vrow$lab_id,
+    isolate_number    = vrow$isolate_number,
+    os_identifier     = cands$os_identifier,
+    project_id        = cands$project_id,
+    specimen_label    = cands$specimen_label,
+    cp_short_title    = cands$cp_short_title,
+    score             = score,
+    label_score       = label_score,
+    subject_score     = subject_score,
+    mdro_score        = mdro_score,
+    organism_score    = organism_score,
+    date_score        = date_score,
+    cp_score          = cp_score,
+    cryo_score        = cryo_score,
+    date_diff_days    = date_diff,
+    mdro_disagree     = mdro_disagree,
+    organism_disagree = organism_disagree
+  )
 }
 
 .organism_genus <- function(x) {

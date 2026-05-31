@@ -119,6 +119,38 @@ test_that("auto_match ignores ARRRRG underscores and REACT case differences", {
                     candidates$label_score == 60L))
 })
 
+test_that("auto_match parallel path matches serial scoring", {
+  vitek <- tibble::tibble(
+    lab_id = c("ARG026P2CRE1", "bEM037PRAE1"),
+    isolate_number = c("1", "1"),
+    parsed_subject = c("ARG026", "bEM037"),
+    parsed_target = c("CRE", NA_character_),
+    cp_hint = c("ARRRRG 2.0", NA_character_),
+    testing_date = as.Date(c("2025-01-10", "2025-01-10")),
+    organism_name = c("K.pneumoniae", "Ps.aeruginosa")
+  )
+
+  specimens <- tibble::tibble(
+    os_identifier = c("arrrg", "react"),
+    project_id = c("ARRRRG", "REACT"),
+    specimen_label = c("ARG026_P2CRE1", "bEM037PRaE1"),
+    cp_short_title = c("ARRRRG 2.0", "REACT"),
+    participant_id = c("ARG026", "BEM037"),
+    custom_collection_date = as.Date(c("2025-01-10", "2025-01-10")),
+    custom_mdro = c("CRE", NA_character_),
+    custom_organism = c("Klebsiella pneumoniae", "Pseudomonas aeruginosa"),
+    type = c("Cryopreserved Cells", "Cryopreserved Cells")
+  )
+
+  serial <- auto_match(vitek, specimens, thresh_review = 0, parallel = FALSE)
+  parallel <- auto_match(vitek, specimens, thresh_review = 0, parallel = TRUE, workers = 2)
+
+  expect_equal(
+    serial |> dplyr::arrange(lab_id, isolate_number, os_identifier),
+    parallel |> dplyr::arrange(lab_id, isolate_number, os_identifier)
+  )
+})
+
 test_that("bucket_results sends high-scoring organism disagreements to review", {
   vitek <- tibble::tibble(
     lab_id = "ARG027SESBL1",
