@@ -351,10 +351,16 @@ linkingServer <- function(id, app_state) {
     # ── Tab count badges ──────────────────────────────────────────────────────
     shiny::observe({
       d <- links_data()
-      n_all      <- nrow(d)
-      n_review   <- sum(d$conf_pct < 80,  na.rm = TRUE)
-      n_edited   <- sum(d$n_edits  > 0,   na.rm = TRUE)
-      n_disputed <- sum(d$disputed,         na.rm = TRUE)
+      n_all <- match_isolate_key_count(d)
+      n_review <- match_isolate_key_count(
+        dplyr::filter(d, conf_pct < 80)
+      )
+      n_edited <- match_isolate_key_count(
+        dplyr::filter(d, n_edits > 0)
+      )
+      n_disputed <- match_isolate_key_count(
+        dplyr::filter(d, disputed)
+      )
 
       session$sendCustomMessage("axis_update_badge",
         list(id = "lk-badge-all",      text = as.character(n_all)))

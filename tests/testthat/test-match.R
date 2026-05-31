@@ -183,3 +183,28 @@ test_that("bucket_results sends high-scoring organism disagreements to review", 
   expect_equal(nrow(buckets$review), 1)
   expect_equal(nrow(buckets$none), 0)
 })
+
+test_that("match bucket counts use Vitek isolate keys instead of candidate rows", {
+  buckets <- list(
+    matched = tibble::tibble(
+      lab_id = "L1",
+      isolate_number = "1",
+      os_identifier = "OS1"
+    ),
+    review = tibble::tibble(
+      lab_id = c("L2", "L2", "L2", "L2"),
+      isolate_number = c("1", "1", "2", "2"),
+      os_identifier = c("OS2", "OS3", "OS4", "OS5")
+    ),
+    none = tibble::tibble(
+      lab_id = "L3",
+      isolate_number = "1"
+    )
+  )
+
+  counts <- match_bucket_counts(buckets)
+
+  expect_equal(counts$matched, 1L)
+  expect_equal(counts$review, 2L)
+  expect_equal(counts$none, 1L)
+})

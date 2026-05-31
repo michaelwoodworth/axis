@@ -225,6 +225,37 @@ bucket_results <- function(match_candidates, vitek_unique,
   )
 }
 
+#' Count unique Vitek isolate keys in a match-like table.
+#'
+#' Review buckets can contain multiple candidate OpenSpecimen rows per Vitek
+#' isolate, so UI summaries should count isolate keys rather than candidate rows.
+match_isolate_key_count <- function(x) {
+  if (is.null(x) || nrow(x) == 0 || !"lab_id" %in% names(x)) return(0L)
+
+  if (!"isolate_number" %in% names(x)) {
+    return(as.integer(dplyr::n_distinct(x$lab_id)))
+  }
+
+  as.integer(
+    x |>
+      dplyr::distinct(lab_id, isolate_number) |>
+      nrow()
+  )
+}
+
+#' Count matched / review / none buckets using consistent isolate-level units.
+match_bucket_counts <- function(buckets) {
+  if (is.null(buckets)) {
+    return(list(matched = 0L, review = 0L, none = 0L))
+  }
+
+  list(
+    matched = match_isolate_key_count(buckets$matched),
+    review  = match_isolate_key_count(buckets$review),
+    none    = match_isolate_key_count(buckets$none)
+  )
+}
+
 # ── Project match summary ─────────────────────────────────────────────────────
 
 #' Per-project match summary for the preview card.
@@ -240,16 +271,22 @@ project_match_summary <- function(buckets, projects) {
       pct_matched = double()
     ))
 
-  total_none <- if (!is.null(buckets$none)) nrow(buckets$none) else 0L
+  total_none <- if (!is.null(buckets$none)) {
+    match_isolate_key_count(buckets$none)
+  } else {
+    0L
+  }
 
   purrr::map_dfr(seq_len(nrow(projects)), function(i) {
     pid <- projects$project_id[i]
 
     n_m <- if (!is.null(buckets$matched) && nrow(buckets$matched) > 0)
-      sum(buckets$matched$project_id == pid, na.rm = TRUE) else 0L
+      match_isolate_key_count(
+        dplyr::filter(buckets$matched, project_id == pid)
+      ) else 0L
     n_r <- if (!is.null(buckets$review) && nrow(buckets$review) > 0)
-      dplyr::n_distinct(
-        buckets$review$lab_id[buckets$review$project_id == pid]
+      match_isolate_key_count(
+        dplyr::filter(buckets$review, project_id == pid)
       ) else 0L
     n_n <- total_none   # unmatched Vitek rows aren't project-attributed
 
