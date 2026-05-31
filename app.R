@@ -53,6 +53,7 @@ source("R/data_parse_os.R")      # scan_os_projects(), parse_os_specimens*(), sp
 source("R/data_dedup.R")         # dedup_vitek(), dedup_summary()
 source("R/data_match.R")         # auto_match(), bucket_results(), etc.
 source("R/data_clean.R")         # build_cleaned()
+source("R/data_export_cfu.R")    # write_cfu_*_csv()
 source("R/mdro_categories.R")    # axis_interpret_mdro_categories()
 
 # ── Source UI / modules ───────────────────────────────────────────────────────
