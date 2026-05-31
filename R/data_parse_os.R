@@ -16,8 +16,8 @@
 #   organism_col — genus/species column (or NULL)
 #   isolate_col  — isolate number column (or NULL)
 #   parent_type_col — parent/source specimen type column (or NULL)
-#   cfu_col / cfu_eb_col / growth_cols / day_col / media_col — optional
-#                  culture fields used by the Culture tab
+#   cfu_col / cfu_eb_col / growth_cols / day_col / media_col / site_col
+#                  — optional culture fields used by the Culture tab
 #
 # OUTPUT specimens tibble (§4b schema):
 #   os_identifier, specimen_label, cp_short_title,
@@ -55,7 +55,8 @@ CP_FORM_MAP <- list(
     cfu_eb_col   = "FAIR#CFU (EB)",
     growth_cols  = c("FAIR#ESBL Growth", "FAIR#VRE Growth", "FAIR#C. auris Growth"),
     day_col      = "FAIR#Day",
-    media_col    = "FAIR#Selective Growth Media"
+    media_col    = "FAIR#Selective Growth Media",
+    site_col     = NULL
   ),
 
   # REACT Specimen — prefix "REACT Specimen#"
@@ -71,7 +72,8 @@ CP_FORM_MAP <- list(
     cfu_eb_col   = NULL,
     growth_cols  = c("REACT Specimen#ESBL Growth", "REACT Specimen#VRE Growth"),
     day_col      = "REACT Specimen#REACT Day",
-    media_col    = "REACT Specimen#Selective Media"
+    media_col    = "REACT Specimen#Selective Media",
+    site_col     = "REACT Specimen#Site Name"
   ),
 
   # SNT / reactform — prefix "reactform#"
@@ -87,7 +89,8 @@ CP_FORM_MAP <- list(
     cfu_eb_col   = NULL,
     growth_cols  = character(),
     day_col      = NULL,
-    media_col    = NULL
+    media_col    = NULL,
+    site_col     = NULL
   )
 )
 
@@ -275,6 +278,7 @@ parse_os_specimens <- function(file_path, project_id = NULL) {
     loc_row        <- .col_or_na(df, "Location#Row")
     loc_col        <- .col_or_na(df, "Location#Column")
     loc_pos        <- .col_or_na(df, "Location#Position")
+    anatomic_site  <- .col_or_na(df, "Anatomic Site")
     collection_dt  <- .parse_os_datetime(.col_or_na(df, "Collection Event#Date and Time"))
 
     # ── Custom-form columns (form-specific) ───────────────────────────────
@@ -314,6 +318,12 @@ parse_os_specimens <- function(file_path, project_id = NULL) {
 
       custom_selective_media <- if (!is.null(entry$media_col) && entry$media_col %in% col_names) {
         as.character(df[[entry$media_col]])
+      } else {
+        rep(NA_character_, nrow(df))
+      }
+
+      custom_site <- if (!is.null(entry$site_col) && entry$site_col %in% col_names) {
+        as.character(df[[entry$site_col]])
       } else {
         rep(NA_character_, nrow(df))
       }
@@ -367,6 +377,7 @@ parse_os_specimens <- function(file_path, project_id = NULL) {
       custom_parent_specimen_type <- rep(NA_character_, nrow(df))
       custom_day             <- rep(NA_character_, nrow(df))
       custom_selective_media <- rep(NA_character_, nrow(df))
+      custom_site            <- rep(NA_character_, nrow(df))
       custom_mdro            <- rep(NA_character_, nrow(df))
       custom_blob            <- vector("list", nrow(df))
       custom_growth_blob     <- vector("list", nrow(df))
@@ -392,12 +403,14 @@ parse_os_specimens <- function(file_path, project_id = NULL) {
       location_row           = loc_row,
       location_col           = loc_col,
       location_pos           = loc_pos,
+      anatomic_site          = anatomic_site,
       participant_id         = participant_id,
       custom_collection_date = custom_collection_date,
       custom_organism        = custom_organism,
       custom_parent_specimen_type = custom_parent_specimen_type,
       custom_day             = custom_day,
       custom_selective_media = custom_selective_media,
+      custom_site            = custom_site,
       custom_growth_blob     = custom_growth_blob,
       custom_mdro            = custom_mdro,
       cfu_raw                = cfu_norm$cfu_raw,
@@ -511,12 +524,14 @@ specimens_empty <- function() {
     location_row           = character(),
     location_col           = character(),
     location_pos           = character(),
+    anatomic_site          = character(),
     participant_id         = character(),
     custom_collection_date = as.Date(character()),
     custom_organism        = character(),
     custom_parent_specimen_type = character(),
     custom_day             = character(),
     custom_selective_media = character(),
+    custom_site            = character(),
     custom_growth_blob     = list(),
     custom_mdro            = character(),
     cfu_raw                = character(),

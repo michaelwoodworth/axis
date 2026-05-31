@@ -73,8 +73,10 @@
   required <- c(
     "source_file", "source_row", "project_id", "cp_short_title",
     "os_identifier", "specimen_label", "participant_id", "custom_day",
+    "type", "lineage", "parent_label", "location_container", "location_row",
+    "location_col", "location_pos",
     "custom_collection_date", "collection_dt", "custom_selective_media",
-    "custom_organism", "custom_mdro", "cfu_raw", "cfu_log10", "cfu_value",
+    "custom_site", "anatomic_site", "custom_organism", "custom_mdro", "cfu_raw", "cfu_log10", "cfu_value",
     "cfu_unit", "cfu_censored", "growth_method", "is_pseudocount",
     "cfu_flag", "has_quant"
   )
@@ -82,8 +84,11 @@
   out <- df |>
     dplyr::mutate(
       custom_day = dplyr::na_if(trimws(as.character(.data$custom_day)), ""),
+      custom_site = dplyr::na_if(trimws(as.character(.data$custom_site)), ""),
+      anatomic_site = dplyr::na_if(trimws(as.character(.data$anatomic_site)), ""),
       time_point_date = dplyr::coalesce(as.Date(.data$custom_collection_date), as.Date(.data$collection_dt)),
       time_point_label = dplyr::coalesce(.data$custom_day, as.character(.data$time_point_date), "—"),
+      site = dplyr::coalesce(.data$custom_site, .data$anatomic_site, .data$cp_short_title, .data$project_id),
       has_quant = dplyr::coalesce(as.logical(.data$has_quant), FALSE),
       is_pseudocount = dplyr::coalesce(as.logical(.data$is_pseudocount), FALSE),
       cfu_censored = dplyr::coalesce(as.logical(.data$cfu_censored), FALSE)
@@ -91,6 +96,26 @@
   out$cfu_status <- .cfu_export_status(out)
   out$cfu_issue <- .cfu_export_issue(out)
   out
+}
+
+.cfu_mdro_flags <- function(x) {
+  raw <- toupper(trimws(as.character(x)))
+  raw[raw %in% c("", "NA", "N/A", "NULL", "NONE", "NO", "NEGATIVE", "NON-MDRO", "NON MDRO", "NO MDRO")] <- NA_character_
+  cre <- !is.na(raw) & grepl("CRE|CRKP|CREC", raw)
+  esbl <- !is.na(raw) & grepl("ESBL|ESCRE", raw)
+  vre <- !is.na(raw) & grepl("VRE", raw)
+  mdrp <- !is.na(raw) & grepl("MDRP|CRPA|MULTIDRUG[- ]RESISTANT PSEUDOMONAS|MDR PSEUDOMONAS", raw)
+  mdro <- !is.na(raw) & (
+    cre | esbl | vre | mdrp |
+      grepl("MDRA|CRAB|MRSA|MDRO|POSITIVE|YES", raw)
+  )
+  tibble::tibble(
+    mdro_positive = as.integer(mdro),
+    cre_positive = as.integer(cre),
+    esbl_positive = as.integer(esbl),
+    vre_positive = as.integer(vre),
+    mdrp_positive = as.integer(mdrp)
+  )
 }
 
 prepare_cfu_review_export <- function(specimens, batch_id = NULL) {
@@ -185,23 +210,80 @@ prepare_cfu_summary_export <- function(specimens, batch_id = NULL) {
     dplyr::arrange(.data$project, .data$participant_id, .data$time_point_date, .data$time_point)
 }
 
+prepare_cfu_specimen_export <- function(specimens, batch_id = NULL) {
+  df <- .cfu_export_base(specimens)
+  if (nrow(df) == 0) return(tibble::tibble())
+
+  flags <- .cfu_mdro_flags(df$custom_mdro)
+  dplyr::bind_cols(df, flags) |>
+    dplyr::mutate(
+      .axis_row_order = dplyr::row_number(),
+      has_cfu_value = !is.na(.data$cfu_log10) | .data$is_pseudocount
+    ) |>
+    dplyr::arrange(.data$os_identifier, dplyr::desc(.data$has_cfu_value), .data$.axis_row_order) |>
+    dplyr::distinct(.data$os_identifier, .keep_all = TRUE) |>
+    dplyr::transmute(
+      batch_id = batch_id %||% NA_character_,
+      project = dplyr::coalesce(.data$cp_short_title, .data$project_id),
+      source_file = .data$source_file,
+      source_row = .data$source_row,
+      os_identifier = .data$os_identifier,
+      specimen_label = .data$specimen_label,
+      participant_id = .data$participant_id,
+      visit_day = .data$time_point_label,
+      visit_date = .data$time_point_date,
+      site = .data$site,
+      anatomic_site = .data$anatomic_site,
+      storage_container = .data$location_container,
+      storage_row = .data$location_row,
+      storage_column = .data$location_col,
+      storage_position = .data$location_pos,
+      specimen_type = .data$type,
+      lineage = .data$lineage,
+      parent_specimen_label = .data$parent_label,
+      organism = .data$custom_organism,
+      mdro_category = .data$custom_mdro,
+      mdro_positive = .data$mdro_positive,
+      cre_positive = .data$cre_positive,
+      esbl_positive = .data$esbl_positive,
+      vre_positive = .data$vre_positive,
+      mdrp_positive = .data$mdrp_positive,
+      selective_media = .data$custom_selective_media,
+      cfu_raw = .data$cfu_raw,
+      cfu_value = .data$cfu_value,
+      cfu_log10 = .data$cfu_log10,
+      cfu_unit = .data$cfu_unit,
+      cfu_censored = .data$cfu_censored,
+      growth_method = .data$growth_method,
+      is_pseudocount = .data$is_pseudocount,
+      cfu_flag = .data$cfu_flag,
+      has_quant = .data$has_quant
+    ) |>
+    dplyr::arrange(.data$project, .data$participant_id, .data$visit_date, .data$specimen_label)
+}
+
 write_cfu_csv_exports <- function(specimens, batch_id = NULL,
                                   output_dir = file.path("data", "exports")) {
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   slug <- .cfu_export_slug(batch_id)
   review <- prepare_cfu_review_export(specimens, batch_id = slug)
   summary <- prepare_cfu_summary_export(specimens, batch_id = slug)
+  specimen <- prepare_cfu_specimen_export(specimens, batch_id = slug)
   review_path <- file.path(output_dir, paste0("cfu_review_", slug, ".csv"))
   summary_path <- file.path(output_dir, paste0("cfu_summary_", slug, ".csv"))
+  specimen_path <- file.path(output_dir, paste0("cfu_specimen_", slug, ".csv"))
 
   readr::write_csv(.cfu_exportable_df(review), review_path, na = "")
   readr::write_csv(.cfu_exportable_df(summary), summary_path, na = "")
+  readr::write_csv(.cfu_exportable_df(specimen), specimen_path, na = "")
 
   list(
     review_path = review_path,
     summary_path = summary_path,
+    specimen_path = specimen_path,
     n_review = nrow(review),
-    n_summary = nrow(summary)
+    n_summary = nrow(summary),
+    n_specimen = nrow(specimen)
   )
 }
 
@@ -223,4 +305,14 @@ write_cfu_summary_csv <- function(specimens, batch_id = NULL,
   path <- file.path(output_dir, paste0("cfu_summary_", slug, ".csv"))
   readr::write_csv(.cfu_exportable_df(summary), path, na = "")
   list(path = path, n = nrow(summary))
+}
+
+write_cfu_specimen_csv <- function(specimens, batch_id = NULL,
+                                   output_dir = file.path("data", "exports")) {
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  slug <- .cfu_export_slug(batch_id)
+  specimen <- prepare_cfu_specimen_export(specimens, batch_id = slug)
+  path <- file.path(output_dir, paste0("cfu_specimen_", slug, ".csv"))
+  readr::write_csv(.cfu_exportable_df(specimen), path, na = "")
+  list(path = path, n = nrow(specimen))
 }

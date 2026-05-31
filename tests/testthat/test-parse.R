@@ -69,7 +69,7 @@ test_that("OpenSpecimen scanner and parser handle CSV and ZIP exports", {
   expect_type(zip_rows$available_qty, "double")
   expect_true("custom_parent_specimen_type" %in% names(zip_rows))
   expect_true(any(!is.na(zip_rows$custom_parent_specimen_type)))
-  expect_true(all(c("custom_day", "custom_selective_media", "cfu_raw", "cfu_log10",
+  expect_true(all(c("anatomic_site", "custom_day", "custom_selective_media", "custom_site", "cfu_raw", "cfu_log10",
                     "growth_method", "is_pseudocount", "has_quant") %in% names(csv_rows)))
   expect_equal(sum(!is.na(csv_rows$cfu_raw) & trimws(csv_rows$cfu_raw) != ""), 39)
   expect_equal(sum(csv_rows$has_quant, na.rm = TRUE), 40)
