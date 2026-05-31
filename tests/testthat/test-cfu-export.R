@@ -83,6 +83,19 @@ test_that("CFU specimen export has one row per specimen and MDRO indicators", {
   expect_equal(mdrp$visit_day, "Screen")
 })
 
+test_that("CFU specimen export supports combined MDRO categories", {
+  fixture <- .cfu_export_fixture()
+  fixture$custom_mdro[1] <- "ESBL; VRE"
+
+  specimen <- prepare_cfu_specimen_export(fixture, batch_id = "B-test")
+  row <- specimen |> dplyr::filter(os_identifier == "os1")
+
+  expect_equal(row$mdro_positive, 1)
+  expect_equal(row$cre_positive, 0)
+  expect_equal(row$esbl_positive, 1)
+  expect_equal(row$vre_positive, 1)
+})
+
 test_that("CFU CSV writers create separate review and summary files", {
   out_dir <- tempfile("cfu_exports_")
   info <- write_cfu_csv_exports(.cfu_export_fixture(), batch_id = "B-test", output_dir = out_dir)

@@ -89,3 +89,25 @@ test_that("OpenSpecimen parser strips glycerol suffix only for cryopreserved cel
   expect_false(any(grepl("glycerol", cryo$specimen_label, ignore.case = TRUE)))
   expect_true(any(cryo$specimen_label_raw != cryo$specimen_label))
 })
+
+test_that("OpenSpecimen parser derives specific MDRO categories from positive flags", {
+  rows <- tibble::tibble(
+    `REACT Specimen#MDRO` = c("Positive", "Positive", "Negative", NA_character_),
+    `REACT Specimen#CRE` = c("Negative", "Negative", "Positive", NA_character_),
+    `REACT Specimen#ESBL` = c("Positive", "Negative", "Positive", NA_character_),
+    `REACT Specimen#VRE` = c("Positive", "Negative", "Negative", "Positive"),
+    `REACT Specimen#MDRP` = c("Negative", "Negative", "Negative", NA_character_),
+    `REACT Specimen#CRAB` = c("Negative", "Positive", "Negative", NA_character_)
+  )
+
+  out <- .derive_mdro_from_flags(
+    rows,
+    primary_col = "REACT Specimen#MDRO",
+    flags = c(
+      "REACT Specimen#CRE", "REACT Specimen#ESBL", "REACT Specimen#VRE",
+      "REACT Specimen#MDRP", "REACT Specimen#CRAB"
+    )
+  )
+
+  expect_equal(out, c("ESBL; VRE", "CRAB", "CRE; ESBL", "VRE"))
+})
