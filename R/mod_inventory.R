@@ -3,7 +3,7 @@
 # Prompt D of HANDOFF.md
 #
 # Layout:
-#   Filter chip bar  (Study, Site, Range, Specimen, Species, Status)
+#   Filter chip bar  (Study, Site, Range, Specimen, MDRO, Species)
 #   Hero card:
 #     - 4 KPI tiles with sparklines (echarts4r)
 #     - Stacked-area accrual chart   (echarts4r, MDRO_COLORS)
@@ -136,8 +136,8 @@ inventoryUI <- function(id) {
         .inv_chip(ns("f_study"),    "Study"),
         .inv_chip(ns("f_site"),     "Site"),
         .inv_chip(ns("f_specimen"), "Specimen"),
+        .inv_chip(ns("f_mdro"),     "MDRO"),
         .inv_chip(ns("f_species"),  "Species"),
-        .inv_chip(ns("f_status"),   "Status"),
         shiny::div(
           class = "inv-chip-wrap",
           shiny::span(class = "inv-chip-label", "Range"),
@@ -305,12 +305,12 @@ inventoryServer <- function(id, app_state) {
       d <- cleaned_data()
       if (nrow(d) == 0) return()
 
-      studies  <- sort(unique(na.omit(d$v_parsed_study)))
-      d <- add_inventory_site_fields(d)
-      sites    <- sort(unique(na.omit(d$inv_site_label)))
-      specs    <- sort(unique(na.omit(d$clean_specimen_type)))
-      species  <- sort(unique(na.omit(d$clean_organism)))
-      statuses <- sort(unique(na.omit(d$state)))
+      d <- add_inventory_flow_fields(d)
+      studies <- ordered_flow_choices(unique(stats::na.omit(d$flow_study)), "study")
+      sites   <- ordered_flow_choices(unique(stats::na.omit(d$flow_site)), "site")
+      specs   <- ordered_flow_choices(unique(stats::na.omit(d$flow_parent)), "parent")
+      mdros   <- ordered_flow_choices(unique(stats::na.omit(d$flow_mdro)), "mdro")
+      species <- ordered_flow_choices(unique(stats::na.omit(d$flow_species)), "species")
 
       shiny::updateSelectInput(session, "f_study",
         choices = c("All", studies), selected = "All")
@@ -318,10 +318,10 @@ inventoryServer <- function(id, app_state) {
         choices = c("All", sites),   selected = "All")
       shiny::updateSelectInput(session, "f_specimen",
         choices = c("All", specs),   selected = "All")
+      shiny::updateSelectInput(session, "f_mdro",
+        choices = c("All", mdros),   selected = "All")
       shiny::updateSelectInput(session, "f_species",
         choices = c("All", species), selected = "All")
-      shiny::updateSelectInput(session, "f_status",
-        choices = c("All", statuses),selected = "All")
 
       # Date range defaults
       if ("v_testing_date" %in% names(d)) {
@@ -338,27 +338,27 @@ inventoryServer <- function(id, app_state) {
     filtered <- shiny::reactive({
       d <- cleaned_data()
       if (nrow(d) == 0) return(d)
-      d <- add_inventory_site_fields(d)
+      d <- add_inventory_flow_fields(d)
 
       # Study
       if (!is.null(input$f_study) && input$f_study != "All")
-        d <- dplyr::filter(d, v_parsed_study == input$f_study)
+        d <- dplyr::filter(d, flow_study == input$f_study)
 
       # Site
       if (!is.null(input$f_site) && input$f_site != "All")
-        d <- dplyr::filter(d, inv_site_label == input$f_site)
+        d <- dplyr::filter(d, flow_site == input$f_site)
 
       # Specimen
       if (!is.null(input$f_specimen) && input$f_specimen != "All")
-        d <- dplyr::filter(d, clean_specimen_type == input$f_specimen)
+        d <- dplyr::filter(d, flow_parent == input$f_specimen)
+
+      # MDRO
+      if (!is.null(input$f_mdro) && input$f_mdro != "All")
+        d <- dplyr::filter(d, flow_mdro == input$f_mdro)
 
       # Species
       if (!is.null(input$f_species) && input$f_species != "All")
-        d <- dplyr::filter(d, clean_organism == input$f_species)
-
-      # Status
-      if (!is.null(input$f_status) && input$f_status != "All")
-        d <- dplyr::filter(d, state == input$f_status)
+        d <- dplyr::filter(d, flow_species == input$f_species)
 
       # Date range
       if (!is.null(input$f_range) && "v_testing_date" %in% names(d)) {
@@ -389,7 +389,7 @@ inventoryServer <- function(id, app_state) {
 
     output$kpi_studies <- shiny::renderText({
       d <- filtered()
-      n <- dplyr::n_distinct(na.omit(d$v_parsed_study))
+      n <- dplyr::n_distinct(na.omit(d$flow_study))
       format(n, big.mark = ",")
     })
     output$kpi_studies_sub <- shiny::renderText("active studies")
@@ -529,18 +529,7 @@ inventoryServer <- function(id, app_state) {
       }
 
       linked_flow <- if (nrow(d) > 0) {
-        d |>
-          dplyr::mutate(
-            flow_site = display_flow_site(inv_site_label, project_id, cp_short_title),
-            flow_study = purrr::pmap_chr(
-              list(clean_participant_id, v_parsed_subject, lab_id,
-                   v_parsed_study, clean_cp_title, cp_short_title, project_id),
-              display_flow_study
-            ),
-            flow_parent = display_flow_parent(clean_parent_specimen_type),
-            flow_mdro = canonical_flow_mdro(inv_mdro_category),
-            flow_species = clean_organism
-          )
+        add_inventory_flow_fields(d)
       } else {
         tibble::tibble()
       }
@@ -804,6 +793,25 @@ add_inventory_mdro_fields <- function(d, cleaned_ast = NULL) {
     )
 }
 
+add_inventory_flow_fields <- function(d) {
+  if (is.null(d) || nrow(d) == 0) return(d)
+
+  d <- add_inventory_site_fields(d)
+  d |>
+    dplyr::mutate(
+      flow_site = display_flow_site(inv_site_label, project_id, cp_short_title),
+      flow_study = purrr::pmap_chr(
+        list(clean_participant_id, v_parsed_subject, lab_id,
+             v_parsed_study, clean_cp_title, cp_short_title, project_id),
+        display_flow_study
+      ),
+      flow_parent = display_flow_parent(clean_parent_specimen_type),
+      flow_mdro = canonical_flow_mdro(inv_mdro_category),
+      flow_species = clean_organism
+    ) |>
+    normalize_flow_columns()
+}
+
 normalize_flow_columns <- function(d) {
   if (is.null(d) || nrow(d) == 0) return(d)
 
@@ -853,6 +861,10 @@ canonical_flow_study <- function(study) {
   out[!is.na(upper) & grepl("FAIR618|\\bFAIR\\b|FAIR_OUTPUT", upper)] <- "FAIR"
   out[!is.na(upper_compact) & grepl("^ARRRRG(V?2|20)?", upper_compact)] <- "ARRRRG"
   out[!is.na(upper) & grepl("\\bARG\\b", upper)] <- "ARRRRG"
+  out[!is.na(upper) & grepl("\\bAPPS\\b", upper)] <- "APPS"
+  out[!is.na(upper) & grepl("\\bREACT\\b", upper)] <- "REACT"
+  out[!is.na(upper) & grepl("SNT|SENTINEL", upper)] <- "APPS + REACT"
+  out[!is.na(upper) & grepl("APPS", upper) & grepl("REACT", upper)] <- "APPS + REACT"
   out
 }
 
@@ -937,6 +949,8 @@ os_enterococcus_flow_rows <- function(specimens, input = NULL) {
       d <- dplyr::filter(d, flow_site == input$f_site)
     if (!is.null(input$f_specimen) && input$f_specimen != "All")
       d <- dplyr::filter(d, flow_parent == input$f_specimen)
+    if (!is.null(input$f_mdro) && input$f_mdro != "All")
+      d <- dplyr::filter(d, flow_mdro == input$f_mdro)
     if (!is.null(input$f_species) && input$f_species != "All")
       d <- dplyr::filter(d, flow_species == input$f_species)
     if (!is.null(input$f_range)) {
@@ -1054,11 +1068,11 @@ display_flow_study <- function(participant_id, parsed_subject, lab_id,
     if (any(grepl("^R(EM|AG|ML|SP)", ids))) return("REACT")
     if (any(grepl("^[A-QS-Z](EM|AG|ML|SP)", ids))) return("APPS")
     if (any(grepl("^APPS", ids))) return("APPS")
-    if (any(grepl("^SNT", ids))) return("Sentinel REACT")
+    if (any(grepl("^SNT", ids))) return("APPS + REACT")
   }
 
   if (grepl("\\bAPPS\\b", text)) return("APPS")
-  if (grepl("\\bSNT\\b|SENTINEL", text)) return("Sentinel REACT")
+  if (grepl("\\bSNT\\b|SENTINEL", text)) return("APPS + REACT")
   if (grepl("\\bREACT\\b", text)) return("REACT")
 
   fallback <- dplyr::coalesce(
@@ -1069,6 +1083,29 @@ display_flow_study <- function(participant_id, parsed_subject, lab_id,
     "Study unspecified"
   )
   canonical_flow_study(fallback)
+}
+
+ordered_flow_choices <- function(x, layer = c("study", "site", "parent", "mdro", "species")) {
+  layer <- match.arg(layer)
+  x <- sort(unique(stats::na.omit(trimws(as.character(x)))))
+  x <- x[nzchar(x)]
+
+  preferred <- switch(layer,
+    study = c("APPS", "REACT", "APPS + REACT", "FAIR", "ARRRRG", "Study unspecified"),
+    site = c(
+      "Emory University Hospital", "ELTAC", "A.G. Rhodes",
+      "A.G. Rhodes Wesley Woods", "RML Specialty Hospital",
+      "Good Shepherd Penn Partners"
+    ),
+    parent = c("Perirectal eSwab", "Environmental Sponge", "Isolates", "Parent specimen unspecified"),
+    mdro = c(
+      "Non-MDRO", "ESBL", "CRE", "VRE", "MDRP", "MDRA", "CRAB", "CRPA",
+      "MRSA", "MDRO positive (unspecified)", "MDRO unspecified"
+    ),
+    species = character()
+  )
+
+  c(intersect(preferred, x), setdiff(x, preferred))
 }
 
 display_flow_parent <- function(parent_type) {
