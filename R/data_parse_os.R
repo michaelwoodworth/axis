@@ -64,7 +64,14 @@ CP_FORM_MAP <- list(
     pid_col      = "REACT Specimen#Participant ID",
     date_col     = NULL,           # fall back to Collection Event#Date and Time
     mdro_col     = "REACT Specimen#MDRO",
-    mdro_fn      = NULL,
+    mdro_fn      = function(df) .derive_mdro_from_flags(
+      df,
+      primary_col = "REACT Specimen#MDRO",
+      flags = c(
+        "REACT Specimen#CRE", "REACT Specimen#ESBL", "REACT Specimen#VRE",
+        "REACT Specimen#MDRP", "REACT Specimen#CRAB"
+      )
+    ),
     organism_col = "REACT Specimen#Genus Species",
     isolate_col  = "REACT Specimen#Isolate Number",
     parent_type_col = "REACT Specimen#Parent Specimen Type",
@@ -190,17 +197,35 @@ get_cp_form_map <- function() {
   }
   primary[primary %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
 
-  result <- primary
-  needs_flag <- is.na(result)
-  for (flag_col in flags) {
-    if (!flag_col %in% names(df)) next
-    token <- sub("^.*#", "", flag_col)
-    token <- sub("\\s+.*$", "", token)
-    hits <- needs_flag & .truthy(df[[flag_col]])
-    result[hits] <- token
-    needs_flag <- is.na(result)
-  }
-  result
+  flag_tokens <- purrr::map(seq_len(nrow(df)), function(i) {
+    hits <- character()
+    for (flag_col in flags) {
+      if (!flag_col %in% names(df)) next
+      if (!.truthy(df[[flag_col]][i])) next
+      token <- sub("^.*#", "", flag_col)
+      token <- sub("\\s+.*$", "", token)
+      hits <- c(hits, token)
+    }
+    unique(hits)
+  })
+
+  primary_norm <- toupper(trimws(primary))
+  primary_generic <- is.na(primary_norm) | primary_norm %in% c(
+    "POS", "POSITIVE", "YES", "Y", "TRUE", "T", "1", "MDRO POSITIVE"
+  )
+  primary_negative <- primary_norm %in% c(
+    "NEG", "NEGATIVE", "NO", "N", "FALSE", "F", "0", "NONE",
+    "NON-MDRO", "NON MDRO", "NO MDRO"
+  )
+
+  vapply(seq_along(primary), function(i) {
+    tokens <- flag_tokens[[i]]
+    if (length(tokens) > 0 && !primary_generic[i] && !primary_negative[i]) {
+      tokens <- unique(c(primary[i], tokens))
+    }
+    if (length(tokens) > 0) return(paste(tokens, collapse = "; "))
+    primary[i]
+  }, character(1))
 }
 
 .resolve_os_csv_path <- function(file_path) {
