@@ -286,6 +286,66 @@ build_cleaned_ast <- function(cleaned, vitek_ast) {
     dplyr::arrange(project_id, lab_id, isolate_number, drug_code)
 }
 
+#' Build a specimen-level dataset from linked isolate rows.
+#'
+#' This keeps the isolate/Cryopreserved Cell export intact while giving
+#' reviewers one row per parent/specimen label for MDRO concordance checks.
+build_specimen_dataset <- function(cleaned) {
+  if (is.null(cleaned) || nrow(cleaned) == 0) {
+    return(tibble::tibble(
+      project_id = character(),
+      cp_short_title = character(),
+      clean_participant_id = character(),
+      specimen_label = character(),
+      n_linked_isolates = integer(),
+      linked_lab_ids = character(),
+      linked_os_identifiers = character(),
+      mdro_categories = character(),
+      organisms = character(),
+      first_testing_date = character(),
+      last_testing_date = character(),
+      any_mdro_disagree = logical()
+    ))
+  }
+
+  cleaned <- .ensure_export_col(cleaned, "mdro_disagree", FALSE)
+
+  cleaned |>
+    dplyr::mutate(
+      .axis_mdro_blank = is.na(.data$clean_mdro_category) |
+        trimws(as.character(.data$clean_mdro_category)) == "",
+      .axis_testing_date = suppressWarnings(as.Date(.data$clean_testing_date))
+    ) |>
+    dplyr::group_by(
+      project_id,
+      cp_short_title,
+      clean_participant_id,
+      specimen_label
+    ) |>
+    dplyr::summarise(
+      n_linked_isolates = dplyr::n_distinct(.data$lab_id, .data$isolate_number),
+      linked_lab_ids = .collapse_export_values(.data$lab_id),
+      linked_os_identifiers = .collapse_export_values(.data$os_identifier),
+      mdro_categories = .collapse_export_values(.data$clean_mdro_category[!.data$.axis_mdro_blank]),
+      organisms = .collapse_export_values(.data$clean_organism),
+      first_testing_date = as.character(suppressWarnings(min(.data$.axis_testing_date, na.rm = TRUE))),
+      last_testing_date = as.character(suppressWarnings(max(.data$.axis_testing_date, na.rm = TRUE))),
+      any_mdro_disagree = any(dplyr::coalesce(.data$mdro_disagree, FALSE)),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(
+      first_testing_date = dplyr::na_if(.data$first_testing_date, "Inf"),
+      last_testing_date = dplyr::na_if(.data$last_testing_date, "-Inf")
+    ) |>
+    dplyr::arrange(project_id, clean_participant_id, specimen_label)
+}
+
+.collapse_export_values <- function(x) {
+  vals <- unique(trimws(as.character(x)))
+  vals <- vals[!is.na(vals) & nzchar(vals)]
+  if (length(vals) == 0) "" else paste(vals, collapse = "; ")
+}
+
 #' Write cleaned export artifacts for a batch.
 #'
 #' @param cleaned Link-level cleaned tibble.
@@ -305,7 +365,7 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
   formats <- unique(tolower(formats))
   if (!is.null(csv_path) && nzchar(trimws(csv_path))) {
     csv_path <- trimws(csv_path)
-    if (!grepl("\\.csv$", csv_path, ignore.case = TRUE)) {
+    if (!grepl("\.csv$", csv_path, ignore.case = TRUE)) {
       csv_path <- paste0(csv_path, ".csv")
     }
     output_dir <- dirname(csv_path)
@@ -319,8 +379,11 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
     xlsx = character(),
     duckdb = character(),
     n_cleaned = if (is.null(cleaned)) 0L else nrow(cleaned),
-    n_ast = if (is.null(cleaned_ast)) 0L else nrow(cleaned_ast)
+    n_ast = if (is.null(cleaned_ast)) 0L else nrow(cleaned_ast),
+    n_specimens = 0L
   )
+  specimen_dataset <- build_specimen_dataset(cleaned)
+  outputs$n_specimens <- nrow(specimen_dataset)
 
   if ("csv" %in% formats) {
     cleaned_path <- if (!is.null(csv_path) && nzchar(csv_path)) {
@@ -328,10 +391,16 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
     } else {
       paste0(base, "_links.csv")
     }
-    ast_path <- sub("\\.csv$", "_ast.csv", cleaned_path, ignore.case = TRUE)
+    ast_path <- sub("\.csv$", "_ast.csv", cleaned_path, ignore.case = TRUE)
+    specimen_path <- sub("\.csv$", "_specimens.csv", cleaned_path, ignore.case = TRUE)
     readr::write_csv(.exportable_df(cleaned), cleaned_path, na = "")
     readr::write_csv(.exportable_df(cleaned_ast), ast_path, na = "")
-    outputs$csv <- c(cleaned_links = cleaned_path, cleaned_ast = ast_path)
+    readr::write_csv(.exportable_df(specimen_dataset), specimen_path, na = "")
+    outputs$csv <- c(
+      cleaned_links = cleaned_path,
+      cleaned_ast = ast_path,
+      specimen_dataset = specimen_path
+    )
   }
 
   if ("xlsx" %in% formats) {
@@ -342,7 +411,8 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
       openxlsx::write.xlsx(
         list(
           cleaned_links = .exportable_df(cleaned),
-          cleaned_ast = .exportable_df(cleaned_ast)
+          cleaned_ast = .exportable_df(cleaned_ast),
+          specimen_dataset = .exportable_df(specimen_dataset)
         ),
         file = xlsx_path,
         overwrite = TRUE,
@@ -356,8 +426,8 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
     if (is.null(conn)) {
       warning("No DuckDB connection supplied; skipping DuckDB cleaned export.")
     } else {
-      write_cleaned_export_tables(conn, cleaned, cleaned_ast, batch_id)
-      outputs$duckdb <- c("cleaned_links", "cleaned_ast")
+      write_cleaned_export_tables(conn, cleaned, cleaned_ast, batch_id, specimen_dataset)
+      outputs$duckdb <- c("cleaned_links", "cleaned_ast", "specimen_dataset")
     }
   }
 
