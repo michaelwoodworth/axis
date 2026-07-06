@@ -23,11 +23,20 @@ source("../../R/data_parse_os.R")
   normalizePath(hits[[1]], mustWork = FALSE)
 }
 
+test_that("Pre-Alert style 161 lab IDs do not fall through to FAIR", {
+  parsed <- parse_lab_ids(c("1610123ESBL1", "Pre-Alert-1610456CRE2"))
+
+  expect_equal(parsed$parsed_study, c("PRE_ALERT", "PRE_ALERT"))
+  expect_equal(parsed$cp_hint, c("Pre-Alert", "Pre-Alert"))
+  expect_equal(parsed$parsed_subject, c("1610123", "1610456"))
+  expect_equal(parsed$parsed_target, c("ESBL", "CRE"))
+})
+
 test_that("Vitek parser reads sample XLSX files and preserves AST", {
   vitek_dir <- .axis_private_data_dir("02.vitek2_exports")
   testthat::skip_if(is.na(vitek_dir), "Private Vitek2 sample exports are not available")
 
-  files <- list.files(vitek_dir, pattern = "\\.xlsx$",
+  files <- list.files(vitek_dir, pattern = "\.xlsx$",
                       full.names = TRUE)
   testthat::skip_if(length(files) == 0, "Private Vitek2 sample exports are not available")
   parsed <- parse_vitek_files(files)
