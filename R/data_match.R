@@ -91,7 +91,7 @@
 .norm_organism <- function(x) {
   raw <- trimws(as.character(x))
   raw[raw %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
-  key <- toupper(gsub("\\s+", " ", raw))
+  key <- toupper(gsub("\s+", " ", raw))
   key <- gsub("_", " ", key)
   norm <- .ORGANISM_NORM[key]
   names(norm) <- NULL
@@ -115,10 +115,13 @@
 #'   participant_id, custom_collection_date, custom_mdro.
 #' @param thresh_auto   Numeric ≥ this → auto-matched (default 80).
 #' @param thresh_review Numeric ≥ this → needs-review (default 50).
+#' @param exclude_aliquots Logical. Exclude banked aliquot records from
+#'   candidate review by default while retaining Cryopreserved Cells.
 #' @return match_candidates tibble (all candidate pairs ≥ thresh_review).
 auto_match <- function(vitek_unique, specimens,
                        thresh_auto   = 80,
                        thresh_review = 50,
+                       exclude_aliquots = TRUE,
                        parallel = getOption("axis.match_parallel", TRUE),
                        workers = getOption("axis.match_workers", NULL)) {
 
@@ -128,6 +131,7 @@ auto_match <- function(vitek_unique, specimens,
 
   # Ensure required columns exist with sensible defaults
   vitek_unique <- .ensure_col(vitek_unique, "cp_hint",        NA_character_)
+  vitek_unique <- .ensure_col(vitek_unique, "parsed_study",   NA_character_)
   vitek_unique <- .ensure_col(vitek_unique, "parsed_subject", NA_character_)
   vitek_unique <- .ensure_col(vitek_unique, "parsed_target",  NA_character_)
   vitek_unique <- .ensure_col(vitek_unique, "testing_date",   as.Date(NA))
@@ -139,7 +143,12 @@ auto_match <- function(vitek_unique, specimens,
   specimens <- .ensure_col(specimens, "cp_short_title",         NA_character_)
   specimens <- .ensure_col(specimens, "custom_organism",        NA_character_)
   specimens <- .ensure_col(specimens, "type",                   NA_character_)
+  specimens <- .ensure_col(specimens, "class",                  NA_character_)
   specimens <- .prepare_match_specimens(specimens)
+  if (isTRUE(exclude_aliquots)) {
+    specimens <- dplyr::filter(specimens, !.data$.axis_is_review_aliquot)
+  }
+  if (nrow(specimens) == 0) return(match_candidates_empty())
 
   # Score all pairs using vectorized per-isolate scoring. Specimen-side
   # normalized fields are precomputed once above; large jobs can split isolate
@@ -345,7 +354,11 @@ match_candidates_empty <- function() {
       .axis_organism_upper = toupper(.data$.axis_organism_norm),
       .axis_organism_genus = .organism_genus(.data$.axis_organism_norm),
       .axis_type_trim = trimws(as.character(.data$type)),
-      .axis_cp_title_trim = trimws(as.character(.data$cp_short_title))
+      .axis_class_trim = trimws(as.character(.data$class)),
+      .axis_cp_title_trim = trimws(as.character(.data$cp_short_title)),
+      .axis_is_review_aliquot = grepl("^aliquot$", .data$.axis_type_trim, ignore.case = TRUE) |
+        (grepl("^aliquot$", .data$.axis_class_trim, ignore.case = TRUE) &
+           .data$.axis_type_trim != "Cryopreserved Cells")
     )
 }
 
@@ -356,8 +369,7 @@ match_candidates_empty <- function() {
   cands <- specimens
 
   if (!is.na(vrow$cp_hint) && nchar(trimws(vrow$cp_hint)) > 0) {
-    cp_match <- grepl(vrow$cp_hint, cands$cp_short_title,
-                      ignore.case = TRUE, fixed = FALSE)
+    cp_match <- .cp_titles_overlap(vrow$cp_hint, cands$cp_short_title)
     if (any(cp_match, na.rm = TRUE)) cands <- cands[cp_match, ]
   }
 
@@ -437,10 +449,7 @@ match_candidates_empty <- function() {
   # ── Signal 6: CP hint match (0–5) ────────────────────────────────────
   cp_hint_val <- trimws(as.character(vrow$cp_hint))
   scp <- cands$.axis_cp_title_trim
-  cp_overlap <- mapply(function(hint, cp) {
-    if (is.na(hint) || hint == "" || is.na(cp) || cp == "") return(FALSE)
-    grepl(hint, cp, ignore.case = TRUE) || grepl(cp, hint, ignore.case = TRUE)
-  }, cp_hint_val, scp)
+  cp_overlap <- .cp_titles_overlap(cp_hint_val, scp)
 
   cp_score <- dplyr::case_when(
     is.na(cp_hint_val) | cp_hint_val == "" |
@@ -468,6 +477,12 @@ match_candidates_empty <- function() {
     project_id        = cands$project_id,
     specimen_label    = cands$specimen_label,
     cp_short_title    = cands$cp_short_title,
+    parsed_study      = .first_or_na(vrow$parsed_study),
+    parsed_subject    = .first_or_na(vrow$parsed_subject),
+    parsed_target     = .first_or_na(vrow$parsed_target),
+    cp_hint           = .first_or_na(vrow$cp_hint),
+    os_type           = cands$type,
+    os_class          = cands$class,
     score             = score,
     label_score       = label_score,
     subject_score     = subject_score,
@@ -478,14 +493,46 @@ match_candidates_empty <- function() {
     cryo_score        = cryo_score,
     date_diff_days    = date_diff,
     mdro_disagree     = mdro_disagree,
-    organism_disagree = organism_disagree
+    organism_disagree = organism_disagree,
+    match_explanation = sprintf(
+      "study=%s; cp_hint=%s; OS_CP=%s; OS_type=%s; label=%s; subject=%s; mdro=%s; organism=%s; date_days=%s",
+      .first_or_na(vrow$parsed_study),
+      .first_or_na(vrow$cp_hint),
+      cands$cp_short_title,
+      cands$type,
+      label_score,
+      subject_score,
+      mdro_score,
+      organism_score,
+      ifelse(is.na(date_diff), "NA", as.character(date_diff))
+    )
   )
+}
+
+.first_or_na <- function(x) {
+  if (is.null(x) || length(x) == 0 || is.na(x[[1]])) return(NA_character_)
+  as.character(x[[1]])
+}
+
+.norm_cp_title <- function(x) {
+  x <- toupper(trimws(as.character(x)))
+  x[is.na(x) | x %in% c("", "NA", "N/A")] <- NA_character_
+  gsub("[^A-Z0-9]+", "", x)
+}
+
+.cp_titles_overlap <- function(hint, cp) {
+  hint_norm <- .norm_cp_title(hint)
+  cp_norm <- .norm_cp_title(cp)
+  mapply(function(h, c) {
+    if (is.na(h) || h == "" || is.na(c) || c == "") return(FALSE)
+    grepl(h, c, fixed = TRUE) || grepl(c, h, fixed = TRUE)
+  }, hint_norm, cp_norm)
 }
 
 .organism_genus <- function(x) {
   x <- trimws(as.character(x))
   x[is.na(x)] <- ""
-  sub("\\s+.*$", "", x)
+  sub("\s+.*$", "", x)
 }
 
 .norm_accession_label <- function(x) {
