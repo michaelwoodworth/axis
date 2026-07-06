@@ -315,8 +315,9 @@ write_ingested_tables <- function(conn, batch_id,
 #'
 #' The tables are kept as canonical append-friendly tables. Re-exporting the
 #' same batch replaces that batch's rows before appending fresh data.
-write_cleaned_export_tables <- function(conn, cleaned, cleaned_ast, batch_id) {
-  written <- c(cleaned_links = 0L, cleaned_ast = 0L)
+write_cleaned_export_tables <- function(conn, cleaned, cleaned_ast, batch_id,
+                                        specimen_dataset = NULL) {
+  written <- c(cleaned_links = 0L, cleaned_ast = 0L, specimen_dataset = 0L)
 
   if (!is.null(cleaned) && nrow(cleaned) > 0) {
     tbl <- .with_batch(.stringify_list_cols(cleaned), batch_id)
@@ -328,6 +329,12 @@ write_cleaned_export_tables <- function(conn, cleaned, cleaned_ast, batch_id) {
     tbl <- .with_batch(.stringify_list_cols(cleaned_ast), batch_id)
     .replace_batch_rows(conn, "cleaned_ast", tbl, batch_id)
     written[["cleaned_ast"]] <- nrow(tbl)
+  }
+
+  if (!is.null(specimen_dataset) && nrow(specimen_dataset) > 0) {
+    tbl <- .with_batch(.stringify_list_cols(specimen_dataset), batch_id)
+    .replace_batch_rows(conn, "specimen_dataset", tbl, batch_id)
+    written[["specimen_dataset"]] <- nrow(tbl)
   }
 
   written
