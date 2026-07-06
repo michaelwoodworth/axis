@@ -86,6 +86,39 @@ test_that("auto_match normalizes organism labels and filters to cryopreserved ce
   expect_equal(candidates$cryo_score, 10L)
 })
 
+test_that("auto_match excludes banked aliquots but retains Cryopreserved Cells", {
+  vitek <- tibble::tibble(
+    lab_id = "1610123ESBL1",
+    isolate_number = "1",
+    parsed_study = "PRE_ALERT",
+    parsed_subject = "1610123",
+    parsed_target = "ESBL",
+    cp_hint = "Pre-Alert",
+    testing_date = as.Date("2025-01-10"),
+    organism_name = "Esch.coli"
+  )
+
+  specimens <- tibble::tibble(
+    os_identifier = c("banked-aliquot", "cryo-isolate"),
+    project_id = "PRE_ALERT",
+    specimen_label = c("1610123ESBL1", "1610123ESBL1"),
+    cp_short_title = c("Pre Alert", "Pre Alert"),
+    participant_id = "1610123",
+    custom_collection_date = as.Date("2025-01-10"),
+    custom_mdro = "ESBL",
+    custom_organism = "Escherichia coli",
+    type = c("Aliquot", "Cryopreserved Cells"),
+    class = c("Aliquot", "Aliquot")
+  )
+
+  candidates <- auto_match(vitek, specimens, thresh_review = 0)
+
+  expect_equal(nrow(candidates), 1)
+  expect_equal(candidates$os_identifier, "cryo-isolate")
+  expect_equal(candidates$parsed_study, "PRE_ALERT")
+  expect_match(candidates$match_explanation, "study=PRE_ALERT")
+})
+
 test_that("auto_match ignores ARRRRG underscores and REACT case differences", {
   vitek <- tibble::tibble(
     lab_id = c("ARG026P2CRE1", "bEM037PRAE1"),
