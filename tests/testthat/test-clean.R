@@ -107,6 +107,8 @@ test_that("cleaned export includes linked AST rows and writes files", {
 
   expect_equal(info$n_cleaned, 1)
   expect_equal(info$n_ast, 2)
+  expect_equal(info$n_specimens, 1)
+  expect_true("specimen_dataset" %in% names(info$csv))
   expect_true(all(file.exists(info$csv)))
   expect_true(file.exists(info$xlsx))
 })
