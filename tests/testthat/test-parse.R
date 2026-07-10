@@ -24,12 +24,22 @@ source("../../R/data_parse_os.R")
 }
 
 test_that("Pre-Alert style 161 lab IDs do not fall through to FAIR", {
-  parsed <- parse_lab_ids(c("1610123ESBL1", "Pre-Alert-1610456CRE2"))
+  parsed <- parse_lab_ids(c(
+    "1610123ESBL1", "Pre-Alert-1610456CRE2", "PREALERT-LEGACY001VRE1"
+  ))
 
-  expect_equal(parsed$parsed_study, c("PRE_ALERT", "PRE_ALERT"))
-  expect_equal(parsed$cp_hint, c("Pre-Alert", "Pre-Alert"))
-  expect_equal(parsed$parsed_subject, c("1610123", "1610456"))
-  expect_equal(parsed$parsed_target, c("ESBL", "CRE"))
+  expect_equal(parsed$parsed_study, rep("PRE_ALERT", 3))
+  expect_equal(parsed$cp_hint, rep("Pre-Alert", 3))
+  expect_equal(parsed$parsed_subject[1:2], c("1610123", "1610456"))
+  expect_equal(parsed$parsed_target, c("ESBL", "CRE", "VRE"))
+})
+
+test_that("explicit SNT lab IDs use the SNT collection protocol hint", {
+  parsed <- parse_lab_ids("SNT-LEGACY001ESBL1")
+
+  expect_equal(parsed$parsed_study, "SNT")
+  expect_equal(parsed$cp_hint, "SNT/APPS/React")
+  expect_equal(parsed$parsed_target, "ESBL")
 })
 
 test_that("MEPSD lab IDs remain classified even without an OpenSpecimen link", {

@@ -89,6 +89,16 @@ extract_mdro_target <- function(lid) {
     subject_fn = function(m) paste0("161", m[, 3]),
     target_fn  = NULL
   ),
+  # Some legacy Vitek IDs carry an explicit Pre-Alert prefix but do not use
+  # the 161#### convention. Preserve the full matched label as the subject so
+  # exact-label scoring can still do the primary linkage work.
+  list(
+    pattern    = "^(PRE[-_ ]?ALERT(?:[-_ ]?[A-Z0-9]+)+)",
+    study      = "PRE_ALERT",
+    cp_hint    = "Pre-Alert",
+    subject_fn = function(m) m[, 2],
+    target_fn  = NULL
+  ),
 
   # ── aAG / bAG family ────────────────────────────────────────────────────────
   # Format: [ab]AG###[suffix]
@@ -125,6 +135,13 @@ extract_mdro_target <- function(lid) {
   # ── SNT / APPS / React / MW family ──────────────────────────────────────────
   # Patterns observed: MW##-######, APPS####, REACT####
   # subject = the full matched prefix before any MDRO token
+  list(
+    pattern    = "^(SNT[A-Z0-9_-]+)",
+    study      = "SNT",
+    cp_hint    = "SNT/APPS/React",
+    subject_fn = function(m) m[, 2],
+    target_fn  = NULL
+  ),
   list(
     pattern    = "^(MW\\d{2}-\\d{6})",
     study      = "SNT",
