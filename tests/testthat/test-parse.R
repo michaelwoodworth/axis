@@ -23,6 +23,84 @@ source("../../R/data_parse_os.R")
   normalizePath(hits[[1]], mustWork = FALSE)
 }
 
+test_that("Pre-Alert style 161 lab IDs do not fall through to FAIR", {
+  parsed <- parse_lab_ids(c(
+    "1610123ESBL1", "Pre-Alert-1610456CRE2", "PREALERT-LEGACY001VRE1"
+  ))
+
+  expect_equal(parsed$parsed_study, rep("PRE_ALERT", 3))
+  expect_equal(parsed$cp_hint, rep("Pre-Alert", 3))
+  expect_equal(parsed$parsed_subject[1:2], c("1610123", "1610456"))
+  expect_equal(parsed$parsed_target, c("ESBL", "CRE", "VRE"))
+})
+
+test_that("explicit SNT lab IDs use the SNT collection protocol hint", {
+  parsed <- parse_lab_ids("SNT-LEGACY001ESBL1")
+
+  expect_equal(parsed$parsed_study, "SNT")
+  expect_equal(parsed$cp_hint, "SNT/APPS/React")
+  expect_equal(parsed$parsed_target, "ESBL")
+})
+
+test_that("MEPSD lab IDs remain classified even without an OpenSpecimen link", {
+  parsed <- parse_lab_ids(c("MEPSD001", "MEPSD-DONOR-02CRE1"))
+
+  expect_equal(parsed$parsed_study, c("MEPSD", "MEPSD"))
+  expect_equal(parsed$cp_hint, c("MEPSD", "MEPSD"))
+  expect_equal(parsed$parsed_target, c(NA_character_, "CRE"))
+})
+
+test_that("OpenSpecimen parser accepts legacy Pre-Alert field aliases", {
+  csv <- tempfile(fileext = ".csv")
+  readr::write_csv(
+    tibble::tibble(
+      Identifier = c("PA-P1", "PA-I1"),
+      `Specimen Label` = c("1619001", "1619001ESBL1"),
+      `CP Short Title` = "Pre Alert Legacy",
+      Class = c("Specimen", "Aliquot"),
+      Type = c("Stool", "Cryopreserved Cells"),
+      Lineage = c("New", "Derived"),
+      `Parent Specimen Label` = c(NA_character_, "1619001"),
+      `Pre Alert#Participant ID` = "1619001",
+      `Pre Alert#Collection Date` = "01/10/2025",
+      `Pre Alert#MDRO` = c("ESBL", "ESBL"),
+      `Pre Alert#Genus Species` = c(NA_character_, "Escherichia coli"),
+      `Pre Alert#Parent Specimen Type` = "Stool"
+    ),
+    csv,
+    na = ""
+  )
+
+  parsed <- parse_os_specimens(csv, project_id = "PRE_ALERT")
+  expect_equal(nrow(parsed), 2L)
+  expect_equal(parsed$participant_id, c("1619001", "1619001"))
+  expect_equal(parsed$custom_mdro, c("ESBL", "ESBL"))
+  expect_equal(parsed$parent_label[[2]], "1619001")
+})
+
+test_that("OpenSpecimen parser accepts XLSX exports", {
+  testthat::skip_if_not_installed("openxlsx")
+  xlsx <- tempfile(fileext = ".xlsx")
+  fixture <- data.frame(
+    Identifier = c("PA-P1", "PA-I1"),
+    `Specimen Label` = c("1619001", "1619001ESBL1"),
+    `CP Short Title` = "Pre-Alert",
+    Class = c("Specimen", "Aliquot"),
+    Type = c("Stool", "Cryopreserved Cells"),
+    Lineage = c("New", "Derived"),
+    `Parent Specimen Label` = c(NA_character_, "1619001"),
+    `FAIR#Participant ID` = "1619001",
+    `FAIR#MDRO Category` = c("ESBL", "ESBL"),
+    check.names = FALSE
+  )
+  openxlsx::write.xlsx(fixture, xlsx, overwrite = TRUE)
+
+  parsed <- parse_os_specimens(xlsx, project_id = "PRE_ALERT")
+  expect_equal(nrow(parsed), 2L)
+  expect_equal(parsed$cp_short_title, c("Pre-Alert", "Pre-Alert"))
+  expect_equal(parsed$custom_mdro, c("ESBL", "ESBL"))
+})
+
 test_that("Vitek parser reads sample XLSX files and preserves AST", {
   vitek_dir <- .axis_private_data_dir("02.vitek2_exports")
   testthat::skip_if(is.na(vitek_dir), "Private Vitek2 sample exports are not available")

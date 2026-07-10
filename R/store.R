@@ -315,8 +315,9 @@ write_ingested_tables <- function(conn, batch_id,
 #'
 #' The tables are kept as canonical append-friendly tables. Re-exporting the
 #' same batch replaces that batch's rows before appending fresh data.
-write_cleaned_export_tables <- function(conn, cleaned, cleaned_ast, batch_id) {
-  written <- c(cleaned_links = 0L, cleaned_ast = 0L)
+write_cleaned_export_tables <- function(conn, cleaned, cleaned_ast, batch_id,
+                                        specimen_dataset = NULL) {
+  written <- c(cleaned_links = 0L, cleaned_ast = 0L, specimen_dataset = 0L)
 
   if (!is.null(cleaned) && nrow(cleaned) > 0) {
     tbl <- .with_batch(.stringify_list_cols(cleaned), batch_id)
@@ -328,6 +329,12 @@ write_cleaned_export_tables <- function(conn, cleaned, cleaned_ast, batch_id) {
     tbl <- .with_batch(.stringify_list_cols(cleaned_ast), batch_id)
     .replace_batch_rows(conn, "cleaned_ast", tbl, batch_id)
     written[["cleaned_ast"]] <- nrow(tbl)
+  }
+
+  if (!is.null(specimen_dataset) && nrow(specimen_dataset) > 0) {
+    tbl <- .with_batch(.stringify_list_cols(specimen_dataset), batch_id)
+    .replace_batch_rows(conn, "specimen_dataset", tbl, batch_id)
+    written[["specimen_dataset"]] <- nrow(tbl)
   }
 
   written
@@ -361,8 +368,11 @@ close_db <- function(conn) {
 #' @param matched_tbl  $matched from bucket_results().
 #' @param batch_id     Character. Current batch identifier.
 #' @param created_by   Character. Username / session ID.
+#' @param match_method Character. auto, manual_confirmed, or manual_selected.
+#' @param state        Character link state.
 #' @return tibble matching links_confirmed schema.
-build_links_from_matches <- function(matched_tbl, batch_id, created_by = "analyst") {
+build_links_from_matches <- function(matched_tbl, batch_id, created_by = "analyst",
+                                     match_method = "auto", state = "confirmed") {
   if (is.null(matched_tbl) || nrow(matched_tbl) == 0)
     return(tibble::tibble(
       link_id        = character(), lab_id = character(), isolate_number = character(),
@@ -381,9 +391,9 @@ build_links_from_matches <- function(matched_tbl, batch_id, created_by = "analys
       project_id     = project_id,
       specimen_label = specimen_label,
       cp_short_title = cp_short_title,
-      confidence     = score / 100,
-      match_method   = "auto",
-      state          = "confirmed",
+      confidence     = dplyr::coalesce(as.numeric(score) / 100, 0),
+      match_method   = match_method,
+      state          = state,
       batch_id       = batch_id,
       created_at     = lubridate::now(),
       created_by     = created_by
@@ -403,21 +413,51 @@ commit_matched_links <- function(conn, matched, batch_id,
                                  cleaned_overrides = NULL,
                                  csv_path = NULL,
                                  output_dir = file.path("data", "exports"),
-                                 formats = c("csv", "xlsx", "duckdb")) {
+                                 formats = c("csv", "xlsx", "duckdb"),
+                                 match_method = "auto",
+                                 created_by = "analyst",
+                                 rationale = "") {
   if (is.null(conn)) stop("DuckDB connection is not available.")
   if (is.null(batch_id) || !nzchar(as.character(batch_id))) {
     stop("Batch id is not available.")
   }
   if (is.null(matched) || nrow(matched) == 0) {
-    stop("No auto-matched records are staged to commit.")
+    stop("No link records are staged to commit.")
   }
   if (is.null(vitek_unique) || nrow(vitek_unique) == 0 ||
       is.null(specimens) || nrow(specimens) == 0) {
     stop("Parsed Vitek and OpenSpecimen data are not available. Run ingestion/automerge first.")
   }
 
-  links <- build_links_from_matches(matched, batch_id)
+  links <- build_links_from_matches(
+    matched, batch_id,
+    created_by = created_by,
+    match_method = match_method,
+    state = "confirmed"
+  )
   n <- write_links(conn, links)
+  if (n > 0L && !identical(match_method, "auto")) {
+    rationale_text <- if (is.null(rationale) || length(rationale) == 0L ||
+                          is.na(rationale[[1]])) "" else trimws(as.character(rationale[[1]]))
+    write_overrides(
+      conn,
+      overrides = NULL,
+      edit_log = links |>
+        dplyr::transmute(
+          event_id = purrr::map_chr(seq_len(dplyr::n()), ~ uuid::UUIDgenerate()),
+          link_id = .data$link_id,
+          event_type = "link.manually_confirmed",
+          field = "link",
+          from_value = "unconfirmed",
+          to_value = paste0(
+            .data$os_identifier,
+            if (nzchar(rationale_text)) paste0(" | ", rationale_text) else ""
+          ),
+          who = created_by,
+          when_ts = lubridate::now()
+        )
+    )
+  }
   written_sources <- c(vitek_raw = 0L, vitek_ast = 0L, specimens = 0L)
   if (n > 0L) {
     written_sources <- write_ingested_tables(
@@ -448,10 +488,12 @@ commit_matched_links <- function(conn, matched, batch_id,
     specimens = specimens
   )
   cleaned_ast <- build_cleaned_ast(cleaned_links, vitek_ast)
+  specimen_dataset <- build_specimen_dataset(cleaned_links, specimens)
   export_info <- export_cleaned_dataset(
     cleaned     = cleaned_links,
     cleaned_ast = cleaned_ast,
     batch_id    = batch_id,
+    specimens   = specimens,
     output_dir  = output_dir,
     csv_path    = csv_path,
     formats     = formats,
@@ -465,6 +507,7 @@ commit_matched_links <- function(conn, matched, batch_id,
     cleaned_overrides = overrides,
     cleaned_links = cleaned_links,
     cleaned_ast = cleaned_ast,
+    specimen_dataset = specimen_dataset,
     export_info = export_info
   )
 }

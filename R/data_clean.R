@@ -286,18 +286,305 @@ build_cleaned_ast <- function(cleaned, vitek_ast) {
     dplyr::arrange(project_id, lab_id, isolate_number, drug_code)
 }
 
+#' Resolve every OpenSpecimen record to the highest available parent specimen.
+#'
+#' Parent relationships are label based in OpenSpecimen exports. Resolution is
+#' scoped to project and collection protocol, follows multiple hierarchy levels,
+#' and reports missing parents/cycles rather than silently treating children as
+#' parent specimens.
+resolve_specimen_hierarchy <- function(specimens, max_depth = 20L) {
+  if (is.null(specimens) || nrow(specimens) == 0) return(specimen_hierarchy_empty())
+
+  needed <- list(
+    project_id = NA_character_, cp_short_title = NA_character_,
+    os_identifier = NA_character_, specimen_label = NA_character_,
+    specimen_label_raw = NA_character_, parent_label = NA_character_,
+    participant_id = NA_character_, type = NA_character_, class = NA_character_,
+    custom_mdro = NA_character_, custom_collection_date = as.Date(NA)
+  )
+  for (nm in names(needed)) specimens <- .ensure_export_col(specimens, nm, needed[[nm]])
+
+  sp <- tibble::as_tibble(specimens) |>
+    dplyr::mutate(
+      .axis_row = dplyr::row_number(),
+      .axis_label = dplyr::coalesce(
+        dplyr::na_if(trimws(as.character(.data$specimen_label_raw)), ""),
+        dplyr::na_if(trimws(as.character(.data$specimen_label)), "")
+      ),
+      .axis_label_key = .norm_hierarchy_label(.data$.axis_label),
+      .axis_parent_key = .norm_hierarchy_label(.data$parent_label),
+      .axis_project_key = .norm_hierarchy_label(.data$project_id),
+      .axis_cp_key = .norm_hierarchy_label(.data$cp_short_title)
+    )
+
+  resolved <- purrr::map_dfr(seq_len(nrow(sp)), function(i) {
+    current <- i
+    root <- i
+    depth <- 0L
+    seen <- integer()
+    status <- "root"
+    unresolved_label <- NA_character_
+
+    repeat {
+      parent_key <- sp$.axis_parent_key[[current]]
+      if (is.na(parent_key) || !nzchar(parent_key)) {
+        status <- if (depth == 0L) "root" else "resolved"
+        break
+      }
+      if (depth >= max_depth) {
+        status <- "max_depth"
+        break
+      }
+
+      candidates <- which(
+        sp$.axis_label_key == parent_key &
+          (is.na(sp$.axis_project_key) | is.na(sp$.axis_project_key[[i]]) |
+             sp$.axis_project_key == sp$.axis_project_key[[i]]) &
+          (is.na(sp$.axis_cp_key) | is.na(sp$.axis_cp_key[[i]]) |
+             sp$.axis_cp_key == sp$.axis_cp_key[[i]])
+      )
+      if (length(candidates) == 0L) {
+        status <- "parent_missing"
+        unresolved_label <- trimws(as.character(sp$parent_label[[current]]))
+        root <- NA_integer_
+        depth <- depth + 1L
+        break
+      }
+
+      next_row <- candidates[[1]]
+      if (next_row %in% c(seen, current)) {
+        status <- "cycle"
+        root <- next_row
+        break
+      }
+      seen <- c(seen, current)
+      current <- next_row
+      root <- next_row
+      depth <- depth + 1L
+    }
+
+    root_row <- if (is.na(root)) NULL else sp[root, , drop = FALSE]
+    tibble::tibble(
+      os_identifier = as.character(sp$os_identifier[[i]]),
+      project_id = as.character(sp$project_id[[i]]),
+      cp_short_title = as.character(sp$cp_short_title[[i]]),
+      specimen_label = as.character(sp$specimen_label[[i]]),
+      parent_label = as.character(sp$parent_label[[i]]),
+      record_type = as.character(sp$type[[i]]),
+      record_class = as.character(sp$class[[i]]),
+      record_mdro = as.character(sp$custom_mdro[[i]]),
+      record_collection_date = suppressWarnings(as.Date(sp$custom_collection_date[[i]])),
+      hierarchy_depth = depth,
+      hierarchy_status = status,
+      parent_os_identifier = if (is.null(root_row)) NA_character_ else as.character(root_row$os_identifier[[1]]),
+      parent_specimen_label = if (is.null(root_row)) unresolved_label else as.character(root_row$.axis_label[[1]]),
+      parent_participant_id = if (is.null(root_row)) as.character(sp$participant_id[[i]]) else as.character(root_row$participant_id[[1]]),
+      parent_type = if (is.null(root_row)) NA_character_ else as.character(root_row$type[[1]]),
+      parent_class = if (is.null(root_row)) NA_character_ else as.character(root_row$class[[1]]),
+      parent_mdro = if (is.null(root_row)) NA_character_ else as.character(root_row$custom_mdro[[1]]),
+      parent_collection_date = if (is.null(root_row)) as.Date(NA) else suppressWarnings(as.Date(root_row$custom_collection_date[[1]]))
+    )
+  })
+
+  resolved |>
+    dplyr::mutate(
+      parent_specimen_label = dplyr::coalesce(
+        dplyr::na_if(.data$parent_specimen_label, ""),
+        .data$specimen_label
+      ),
+      .axis_parent_key = paste(
+        .norm_hierarchy_label(.data$project_id),
+        .norm_hierarchy_label(.data$cp_short_title),
+        .norm_hierarchy_label(.data$parent_specimen_label),
+        sep = "::"
+      )
+    )
+}
+
+#' Build a parent-specimen dataset from all OpenSpecimen records and links.
+#'
+#' The output includes parents with no linked isolate so MDRO-negative and
+#' positive/no-isolate records remain visible for concordance review.
+build_specimen_dataset <- function(cleaned, specimens = NULL) {
+  hierarchy <- resolve_specimen_hierarchy(specimens)
+  if (nrow(hierarchy) == 0L) {
+    return(specimen_dataset_empty())
+  }
+
+  parents <- hierarchy |>
+    dplyr::group_by(.data$.axis_parent_key) |>
+    dplyr::summarise(
+      project_id = .first_export_value(.data$project_id),
+      cp_short_title = .first_export_value(.data$cp_short_title),
+      parent_os_identifier = .first_export_value(.data$parent_os_identifier),
+      parent_specimen_label = .first_export_value(.data$parent_specimen_label),
+      participant_id = .first_export_value(.data$parent_participant_id),
+      parent_type = .first_export_value(.data$parent_type),
+      parent_class = .first_export_value(.data$parent_class),
+      parent_collection_date = .first_export_date(.data$parent_collection_date),
+      parent_mdro_categories = .collapse_export_values(
+        .data$record_mdro[
+          is.na(.data$record_type) |
+            trimws(as.character(.data$record_type)) != "Cryopreserved Cells"
+        ]
+      ),
+      n_open_specimen_records = dplyr::n_distinct(.data$os_identifier),
+      max_hierarchy_depth = suppressWarnings(max(.data$hierarchy_depth, na.rm = TRUE)),
+      hierarchy_status = .collapse_export_values(.data$hierarchy_status),
+      .groups = "drop"
+    )
+
+  linked <- specimen_link_summary(cleaned, hierarchy)
+  out <- parents |>
+    dplyr::left_join(linked, by = ".axis_parent_key") |>
+    dplyr::mutate(
+      n_linked_isolates = tidyr::replace_na(.data$n_linked_isolates, 0L),
+      linked_lab_ids = tidyr::replace_na(.data$linked_lab_ids, ""),
+      linked_isolate_os_identifiers = tidyr::replace_na(.data$linked_isolate_os_identifiers, ""),
+      isolate_mdro_categories = tidyr::replace_na(.data$isolate_mdro_categories, ""),
+      organisms = tidyr::replace_na(.data$organisms, ""),
+      any_mdro_disagree = tidyr::replace_na(.data$any_mdro_disagree, FALSE),
+      parent_mdro_status = .mdro_presence_status(.data$parent_mdro_categories),
+      isolate_mdro_status = dplyr::if_else(
+        .data$n_linked_isolates == 0L,
+        "none",
+        .mdro_presence_status(.data$isolate_mdro_categories)
+      ),
+      mdro_concordance = purrr::pmap_chr(
+        list(
+          .data$parent_mdro_categories,
+          .data$isolate_mdro_categories,
+          .data$parent_mdro_status,
+          .data$isolate_mdro_status,
+          .data$n_linked_isolates
+        ),
+        .classify_mdro_concordance
+      )
+    ) |>
+    dplyr::select(-dplyr::all_of(".axis_parent_key")) |>
+    dplyr::arrange(.data$project_id, .data$participant_id, .data$parent_specimen_label)
+
+  out
+}
+
+specimen_link_summary <- function(cleaned, hierarchy) {
+  if (is.null(cleaned) || nrow(cleaned) == 0L) {
+    return(tibble::tibble(
+      .axis_parent_key = character(), n_linked_isolates = integer(),
+      linked_lab_ids = character(), linked_isolate_os_identifiers = character(),
+      isolate_mdro_categories = character(), organisms = character(),
+      first_testing_date = character(), last_testing_date = character(),
+      any_mdro_disagree = logical()
+    ))
+  }
+
+  cleaned <- .ensure_export_col(cleaned, "mdro_disagree", FALSE)
+  cleaned |>
+    dplyr::left_join(
+      hierarchy |>
+        dplyr::select("os_identifier", ".axis_parent_key") |>
+        dplyr::distinct(.data$os_identifier, .keep_all = TRUE),
+      by = "os_identifier"
+    ) |>
+    dplyr::filter(!is.na(.data$.axis_parent_key)) |>
+    dplyr::mutate(.axis_testing_date = suppressWarnings(as.Date(.data$clean_testing_date))) |>
+    dplyr::group_by(.data$.axis_parent_key) |>
+    dplyr::summarise(
+      n_linked_isolates = dplyr::n_distinct(.data$lab_id, .data$isolate_number),
+      linked_lab_ids = .collapse_export_values(.data$lab_id),
+      linked_isolate_os_identifiers = .collapse_export_values(.data$os_identifier),
+      isolate_mdro_categories = .collapse_export_values(.data$clean_mdro_category),
+      organisms = .collapse_export_values(.data$clean_organism),
+      first_testing_date = .first_export_date(.data$.axis_testing_date),
+      last_testing_date = .last_export_date(.data$.axis_testing_date),
+      any_mdro_disagree = any(dplyr::coalesce(.data$mdro_disagree, FALSE)),
+      .groups = "drop"
+    )
+}
+
+.norm_hierarchy_label <- function(x) {
+  x <- toupper(trimws(as.character(x)))
+  x[is.na(x) | x %in% c("", "NA", "N/A")] <- NA_character_
+  gsub("[^A-Z0-9]+", "", x)
+}
+
+.first_export_value <- function(x) {
+  x <- trimws(as.character(x))
+  x <- x[!is.na(x) & nzchar(x)]
+  if (length(x) == 0L) NA_character_ else x[[1]]
+}
+
+.first_export_date <- function(x) {
+  x <- suppressWarnings(as.Date(x))
+  x <- x[!is.na(x)]
+  if (length(x) == 0L) NA_character_ else as.character(min(x))
+}
+
+.last_export_date <- function(x) {
+  x <- suppressWarnings(as.Date(x))
+  x <- x[!is.na(x)]
+  if (length(x) == 0L) NA_character_ else as.character(max(x))
+}
+
+.mdro_presence_status <- function(x) {
+  vapply(as.character(x), function(value) {
+    value <- toupper(trimws(value))
+    if (is.na(value) || !nzchar(value)) return("unknown")
+    if (grepl("^(NEG|NEGATIVE|NO|NONE|NON[- ]?MDRO|0)(;|$)", value)) return("negative")
+    "positive"
+  }, character(1))
+}
+
+.mdro_tokens <- function(x) {
+  if (is.null(x) || length(x) == 0L || is.na(x[[1]])) x <- ""
+  value <- toupper(as.character(x[[1]]))
+  known <- c("CRE", "ESBL", "VRE", "MDRP", "CRAB", "MRSA", "MDRO")
+  known[vapply(known, function(token) grepl(paste0("(^|[^A-Z])", token, "([^A-Z]|$)"), value), logical(1))]
+}
+
+.classify_mdro_concordance <- function(parent_value, isolate_value,
+                                        parent_status, isolate_status,
+                                        n_linked_isolates) {
+  if (is.null(n_linked_isolates) || length(n_linked_isolates) == 0L ||
+      is.na(n_linked_isolates[[1]])) n_linked_isolates <- 0L
+  n_linked_isolates <- as.integer(n_linked_isolates[[1]])
+  if (parent_status == "positive" && n_linked_isolates == 0L) {
+    return("parent_positive_no_linked_isolate")
+  }
+  if (parent_status == "negative" && isolate_status == "positive") {
+    return("isolate_positive_parent_negative")
+  }
+  if (parent_status == "negative") return("concordant_negative")
+  if (parent_status == "unknown") return("not_assessable")
+  if (isolate_status != "positive") return("parent_positive_no_mdro_isolate")
+
+  parent_tokens <- .mdro_tokens(parent_value)
+  isolate_tokens <- .mdro_tokens(isolate_value)
+  if (length(parent_tokens) == 0L || length(isolate_tokens) == 0L) {
+    return("concordant_positive")
+  }
+  if (setequal(parent_tokens, isolate_tokens)) "concordant_positive" else "category_mismatch"
+}
+
+.collapse_export_values <- function(x) {
+  vals <- unique(trimws(as.character(x)))
+  vals <- vals[!is.na(vals) & nzchar(vals)]
+  if (length(vals) == 0) "" else paste(vals, collapse = "; ")
+}
+
 #' Write cleaned export artifacts for a batch.
 #'
 #' @param cleaned Link-level cleaned tibble.
 #' @param cleaned_ast Linked AST tibble from build_cleaned_ast().
 #' @param batch_id Batch id used in output names.
 #' @param output_dir Directory for CSV/XLSX outputs.
-#' @param csv_path Optional explicit path for the cleaned links CSV. When
+#' @param csv_path Optional explicit path for the isolate dataset CSV. When
 #'   supplied, the AST CSV is written beside it using an "_ast.csv" suffix.
 #' @param formats Any of "csv", "xlsx", "duckdb".
 #' @param conn Optional DBI connection for "duckdb" exports.
 #' @return Named list containing output paths and row counts.
 export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
+                                   specimens = NULL,
                                    output_dir = file.path("data", "exports"),
                                    csv_path = NULL,
                                    formats = c("csv", "xlsx", "duckdb"),
@@ -319,19 +606,28 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
     xlsx = character(),
     duckdb = character(),
     n_cleaned = if (is.null(cleaned)) 0L else nrow(cleaned),
-    n_ast = if (is.null(cleaned_ast)) 0L else nrow(cleaned_ast)
+    n_ast = if (is.null(cleaned_ast)) 0L else nrow(cleaned_ast),
+    n_specimens = 0L
   )
+  specimen_dataset <- build_specimen_dataset(cleaned, specimens)
+  outputs$n_specimens <- nrow(specimen_dataset)
 
   if ("csv" %in% formats) {
     cleaned_path <- if (!is.null(csv_path) && nzchar(csv_path)) {
       csv_path
     } else {
-      paste0(base, "_links.csv")
+      paste0(base, "_isolates.csv")
     }
     ast_path <- sub("\\.csv$", "_ast.csv", cleaned_path, ignore.case = TRUE)
+    specimen_path <- sub("\\.csv$", "_specimens.csv", cleaned_path, ignore.case = TRUE)
     readr::write_csv(.exportable_df(cleaned), cleaned_path, na = "")
     readr::write_csv(.exportable_df(cleaned_ast), ast_path, na = "")
-    outputs$csv <- c(cleaned_links = cleaned_path, cleaned_ast = ast_path)
+    readr::write_csv(.exportable_df(specimen_dataset), specimen_path, na = "")
+    outputs$csv <- c(
+      isolate_dataset = cleaned_path,
+      ast_dataset = ast_path,
+      specimen_dataset = specimen_path
+    )
   }
 
   if ("xlsx" %in% formats) {
@@ -341,8 +637,9 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
       xlsx_path <- paste0(base, ".xlsx")
       openxlsx::write.xlsx(
         list(
-          cleaned_links = .exportable_df(cleaned),
-          cleaned_ast = .exportable_df(cleaned_ast)
+          isolate_dataset = .exportable_df(cleaned),
+          ast_dataset = .exportable_df(cleaned_ast),
+          specimen_dataset = .exportable_df(specimen_dataset)
         ),
         file = xlsx_path,
         overwrite = TRUE,
@@ -356,12 +653,44 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
     if (is.null(conn)) {
       warning("No DuckDB connection supplied; skipping DuckDB cleaned export.")
     } else {
-      write_cleaned_export_tables(conn, cleaned, cleaned_ast, batch_id)
-      outputs$duckdb <- c("cleaned_links", "cleaned_ast")
+      write_cleaned_export_tables(conn, cleaned, cleaned_ast, batch_id, specimen_dataset)
+      outputs$duckdb <- c("cleaned_links", "cleaned_ast", "specimen_dataset")
     }
   }
 
   outputs
+}
+
+specimen_hierarchy_empty <- function() {
+  tibble::tibble(
+    os_identifier = character(), project_id = character(),
+    cp_short_title = character(), specimen_label = character(),
+    parent_label = character(), record_type = character(),
+    record_class = character(), record_mdro = character(),
+    record_collection_date = as.Date(character()), hierarchy_depth = integer(),
+    hierarchy_status = character(), parent_os_identifier = character(),
+    parent_specimen_label = character(), parent_participant_id = character(),
+    parent_type = character(), parent_class = character(),
+    parent_mdro = character(), parent_collection_date = as.Date(character()),
+    .axis_parent_key = character()
+  )
+}
+
+specimen_dataset_empty <- function() {
+  tibble::tibble(
+    project_id = character(), cp_short_title = character(),
+    parent_os_identifier = character(), parent_specimen_label = character(),
+    participant_id = character(), parent_type = character(),
+    parent_class = character(), parent_collection_date = character(),
+    parent_mdro_categories = character(), n_open_specimen_records = integer(),
+    max_hierarchy_depth = integer(), hierarchy_status = character(),
+    n_linked_isolates = integer(), linked_lab_ids = character(),
+    linked_isolate_os_identifiers = character(), isolate_mdro_categories = character(),
+    organisms = character(), first_testing_date = character(),
+    last_testing_date = character(), any_mdro_disagree = logical(),
+    parent_mdro_status = character(), isolate_mdro_status = character(),
+    mdro_concordance = character()
+  )
 }
 
 #' Empty cleaned tibble (matches build_cleaned() output schema).

@@ -302,7 +302,7 @@ ingestionUI <- function(id) {
             tags$span(
               style = sprintf("font-size:11px; color:%s; flex:1; margin-left:6px;",
                               .AX$muted),
-              "one or more .csv/.zip inventory exports"
+              "one or more .csv/.zip/.xlsx/.xls inventory exports"
             )
           ),
           tags$div(class = "ing-panel-bd",
@@ -320,13 +320,13 @@ ingestionUI <- function(id) {
               ),
               tags$div(
                 style = sprintf("font-size:11.5px; color:%s; margin-top:3px;", .AX$muted),
-                "or click to choose one or more .csv/.zip files"
+                "or click to choose one or more .csv/.zip/.xlsx/.xls files"
               ),
               fileInput(
                 ns("os_files"),
                 label       = NULL,
                 multiple    = TRUE,
-                accept      = c(".csv", ".zip"),
+                accept      = c(".csv", ".zip", ".xlsx", ".xls"),
                 buttonLabel = "Choose files",
                 placeholder = ""
               )
@@ -565,7 +565,7 @@ ingestionServer <- function(id, app_state) {
 
     default_cleaned_csv_path <- function(batch_id = rv$batch_id) {
       slug <- gsub("[^A-Za-z0-9_-]+", "_", batch_id %||% "B")
-      file.path("data", "exports", paste0("AXIS_clean_", slug, "_links.csv"))
+      file.path("data", "exports", paste0("AXIS_clean_", slug, "_isolates.csv"))
     }
 
     default_flagged_csv_path <- function(kind, batch_id = rv$batch_id) {
@@ -609,7 +609,10 @@ ingestionServer <- function(id, app_state) {
         return(invisible(NULL))
       }
       if (is.null(rv$specimens) || nrow(rv$specimens) == 0L) {
-        showNotification("Upload one or more OpenSpecimen CSV/ZIP exports before automerge.", type = "warning")
+        showNotification(
+          "Upload one or more OpenSpecimen CSV/ZIP/XLSX/XLS exports before automerge.",
+          type = "warning"
+        )
         return(invisible(NULL))
       }
 
@@ -677,15 +680,17 @@ ingestionServer <- function(id, app_state) {
         app_state$cleaned_overrides <- result$cleaned_overrides
         app_state$cleaned_links     <- result$cleaned_links
         app_state$cleaned_ast       <- result$cleaned_ast
+        app_state$specimen_dataset  <- result$specimen_dataset
 
         showNotification(
           sprintf(
-            "%d link%s committed to AXIS_clean_%s. Exported %d cleaned rows and %d AST rows.",
+            "%d link%s committed to AXIS_clean_%s. Exported %d isolate links, %d AST rows, and %d parent specimens.",
             result$n_committed,
             if (result$n_committed == 1L) "" else "s",
             rv$batch_id,
             result$export_info$n_cleaned,
-            result$export_info$n_ast
+            result$export_info$n_ast,
+            result$export_info$n_specimens
           ),
           type = "message", duration = 6
         )
@@ -894,7 +899,7 @@ ingestionServer <- function(id, app_state) {
         ns("cleaned_csv_path"),
         label = NULL,
         value = default_cleaned_csv_path(),
-        placeholder = "data/exports/AXIS_clean_B-YYYYMMDDHHMM_links.csv",
+        placeholder = "data/exports/AXIS_clean_B-YYYYMMDDHHMM_isolates.csv",
         width = "100%"
       )
     })

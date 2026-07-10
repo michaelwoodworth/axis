@@ -98,6 +98,49 @@ CP_FORM_MAP <- list(
     day_col      = NULL,
     media_col    = NULL,
     site_col     = NULL
+  ),
+
+  # Legacy Pre-Alert forms use several historical prefixes/field labels.
+  "Pre-Alert#" = list(
+    prefixes = c("Pre-Alert#", "Pre Alert#", "PreAlert#", "PRE-ALERT#"),
+    pid_col = c(
+      "Pre-Alert#Participant ID", "Pre Alert#Participant ID",
+      "PreAlert#Participant ID", "Pre-Alert#Patient ID"
+    ),
+    date_col = c(
+      "Pre-Alert#Collection Date", "Pre Alert#Collection Date",
+      "PreAlert#Collection Date"
+    ),
+    mdro_col = c(
+      "Pre-Alert#MDRO", "Pre-Alert#MDRO Category",
+      "Pre Alert#MDRO", "PreAlert#MDRO"
+    ),
+    mdro_fn = NULL,
+    organism_col = c(
+      "Pre-Alert#Genus Species", "Pre-Alert#Organism",
+      "Pre Alert#Genus Species", "PreAlert#Organism"
+    ),
+    isolate_col = c("Pre-Alert#Isolate Number", "Pre Alert#Isolate Number"),
+    parent_type_col = c(
+      "Pre-Alert#Parent Specimen Type", "Pre Alert#Parent Specimen Type"
+    ),
+    cfu_col = NULL, cfu_eb_col = NULL, growth_cols = character(),
+    day_col = NULL, media_col = NULL, site_col = NULL
+  ),
+
+  # MEPSD may be Vitek-only, but this profile supports matching when an
+  # OpenSpecimen cohort export is available.
+  "MEPSD#" = list(
+    prefixes = c("MEPSD#", "MEPSD Specimen#"),
+    pid_col = c("MEPSD#Participant ID", "MEPSD Specimen#Participant ID"),
+    date_col = c("MEPSD#Collection Date", "MEPSD Specimen#Collection Date"),
+    mdro_col = c("MEPSD#MDRO", "MEPSD#MDRO Category", "MEPSD Specimen#MDRO"),
+    mdro_fn = NULL,
+    organism_col = c("MEPSD#Genus Species", "MEPSD#Organism", "MEPSD Specimen#Organism"),
+    isolate_col = c("MEPSD#Isolate Number", "MEPSD Specimen#Isolate Number"),
+    parent_type_col = c("MEPSD#Parent Specimen Type", "MEPSD Specimen#Parent Specimen Type"),
+    cfu_col = NULL, cfu_eb_col = NULL, growth_cols = character(),
+    day_col = NULL, media_col = NULL, site_col = NULL
   )
 )
 
@@ -157,7 +200,8 @@ get_cp_form_map <- function() {
 
 .resolve_form_col <- function(col_names, preferred, prefix = NULL, pattern = NULL,
                               exclude = NULL) {
-  if (!is.null(preferred) && preferred %in% col_names) return(preferred)
+  preferred_hits <- intersect(as.character(preferred %||% character()), col_names)
+  if (length(preferred_hits) > 0L) return(preferred_hits[[1]])
   candidates <- col_names
   if (!is.null(prefix)) candidates <- candidates[startsWith(candidates, prefix)]
   if (!is.null(pattern)) {
@@ -230,8 +274,11 @@ get_cp_form_map <- function() {
 
 .resolve_os_csv_path <- function(file_path) {
   ext <- tolower(tools::file_ext(file_path))
-  if (ext == "csv") return(file_path)
-  if (ext != "zip") stop("Unsupported OpenSpecimen export type: ", file_path)
+  if (ext %in% c("csv", "xlsx", "xls")) return(file_path)
+  if (ext != "zip") stop(
+    "Unsupported OpenSpecimen export type (expected CSV, ZIP, XLSX, or XLS): ",
+    file_path
+  )
 
   listing <- utils::unzip(file_path, list = TRUE)
   csv_entries <- listing$Name[grepl("\\.csv$", listing$Name, ignore.case = TRUE)]
@@ -245,10 +292,21 @@ get_cp_form_map <- function() {
 }
 
 .read_os_csv <- function(file_path, n_max = Inf) {
-  csv_path <- .resolve_os_csv_path(file_path)
+  resolved_path <- .resolve_os_csv_path(file_path)
+  ext <- tolower(tools::file_ext(resolved_path))
+  if (ext %in% c("xlsx", "xls")) {
+    return(suppressMessages(
+      tibble::as_tibble(readxl::read_excel(
+        resolved_path,
+        n_max = n_max,
+        col_types = "text",
+        .name_repair = "unique_quiet"
+      ))
+    ))
+  }
   suppressMessages(
     readr::read_csv(
-      csv_path,
+      resolved_path,
       n_max = n_max,
       show_col_types = FALSE,
       col_types = readr::cols(.default = readr::col_character())
@@ -263,11 +321,21 @@ get_cp_form_map <- function() {
 .detect_form <- function(col_names) {
   map <- get_cp_form_map()
   for (prefix in names(map)) {
-    if (any(startsWith(col_names, prefix))) {
-      return(list(prefix = prefix, entry = map[[prefix]]))
+    entry <- map[[prefix]]
+    prefixes <- entry$prefixes %||% prefix
+    for (candidate in prefixes) {
+      if (any(startsWith(toupper(col_names), toupper(candidate)))) {
+        return(list(prefix = candidate, entry = entry))
+      }
     }
   }
   NULL
+}
+
+.entry_col <- function(entry, field, col_names) {
+  candidates <- as.character(entry[[field]] %||% character())
+  hits <- intersect(candidates, col_names)
+  if (length(hits) == 0L) NULL else hits[[1]]
 }
 
 # ── Single-file parser ────────────────────────────────────────────────────────
@@ -309,46 +377,53 @@ parse_os_specimens <- function(file_path, project_id = NULL) {
     # ── Custom-form columns (form-specific) ───────────────────────────────
     if (!is.null(form)) {
       entry <- form$entry
+      pid_col <- .entry_col(entry, "pid_col", col_names)
+      date_col <- .entry_col(entry, "date_col", col_names)
+      organism_col <- .entry_col(entry, "organism_col", col_names)
+      parent_type_col <- .entry_col(entry, "parent_type_col", col_names)
+      day_col <- .entry_col(entry, "day_col", col_names)
+      media_col <- .entry_col(entry, "media_col", col_names)
+      site_col <- .entry_col(entry, "site_col", col_names)
+      mdro_col <- .entry_col(entry, "mdro_col", col_names)
 
-      participant_id <- if (!is.null(entry$pid_col) && entry$pid_col %in% col_names) {
-        as.character(df[[entry$pid_col]])
+      participant_id <- if (!is.null(pid_col)) {
+        as.character(df[[pid_col]])
       } else {
         rep(NA_character_, nrow(df))
       }
 
-      custom_collection_date <- if (!is.null(entry$date_col) && entry$date_col %in% col_names) {
-        .parse_os_date(df[[entry$date_col]])
+      custom_collection_date <- if (!is.null(date_col)) {
+        .parse_os_date(df[[date_col]])
       } else {
         as.Date(collection_dt)   # fall back to event date
       }
 
-      custom_organism <- if (!is.null(entry$organism_col) && entry$organism_col %in% col_names) {
-        as.character(df[[entry$organism_col]])
+      custom_organism <- if (!is.null(organism_col)) {
+        as.character(df[[organism_col]])
       } else {
         rep(NA_character_, nrow(df))
       }
 
-      custom_parent_specimen_type <- if (!is.null(entry$parent_type_col) &&
-                                         entry$parent_type_col %in% col_names) {
-        as.character(df[[entry$parent_type_col]])
+      custom_parent_specimen_type <- if (!is.null(parent_type_col)) {
+        as.character(df[[parent_type_col]])
       } else {
         rep(NA_character_, nrow(df))
       }
 
-      custom_day <- if (!is.null(entry$day_col) && entry$day_col %in% col_names) {
-        as.character(df[[entry$day_col]])
+      custom_day <- if (!is.null(day_col)) {
+        as.character(df[[day_col]])
       } else {
         rep(NA_character_, nrow(df))
       }
 
-      custom_selective_media <- if (!is.null(entry$media_col) && entry$media_col %in% col_names) {
-        as.character(df[[entry$media_col]])
+      custom_selective_media <- if (!is.null(media_col)) {
+        as.character(df[[media_col]])
       } else {
         rep(NA_character_, nrow(df))
       }
 
-      custom_site <- if (!is.null(entry$site_col) && entry$site_col %in% col_names) {
-        as.character(df[[entry$site_col]])
+      custom_site <- if (!is.null(site_col)) {
+        as.character(df[[site_col]])
       } else {
         rep(NA_character_, nrow(df))
       }
@@ -356,14 +431,14 @@ parse_os_specimens <- function(file_path, project_id = NULL) {
       # MDRO: prefer mdro_fn, then mdro_col
       custom_mdro <- if (!is.null(entry$mdro_fn)) {
         entry$mdro_fn(df)
-      } else if (!is.null(entry$mdro_col) && entry$mdro_col %in% col_names) {
-        as.character(df[[entry$mdro_col]])
+      } else if (!is.null(mdro_col)) {
+        as.character(df[[mdro_col]])
       } else {
         rep(NA_character_, nrow(df))
       }
 
       # All custom-form cols as a list-column for future use
-      custom_cols   <- col_names[startsWith(col_names, form$prefix)]
+      custom_cols <- col_names[startsWith(toupper(col_names), toupper(form$prefix))]
       custom_blob   <- purrr::map(seq_len(nrow(df)), function(i) {
         as.list(df[i, custom_cols, drop = FALSE])
       })
@@ -490,7 +565,7 @@ scan_os_projects <- function(data_dir) {
 
   if (!dir.exists(data_dir)) return(empty)
 
-  export_files <- list.files(data_dir, pattern = "\\.(csv|zip)$",
+  export_files <- list.files(data_dir, pattern = "\\.(csv|zip|xlsx|xls)$",
                              full.names = TRUE, ignore.case = TRUE)
   if (length(export_files) == 0) return(empty)
 
@@ -518,7 +593,11 @@ scan_os_projects <- function(data_dir) {
   scanned |>
     dplyr::mutate(
       .ext = tolower(tools::file_ext(file_name)),
-      .rank = dplyr::if_else(.ext == "csv", 1L, 2L)
+      .rank = dplyr::case_when(
+        .ext == "csv" ~ 1L,
+        .ext %in% c("xlsx", "xls") ~ 2L,
+        TRUE ~ 3L
+      )
     ) |>
     dplyr::arrange(study_label, n_specimens, .rank) |>
     dplyr::distinct(study_label, n_specimens, .keep_all = TRUE) |>

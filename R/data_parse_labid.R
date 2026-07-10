@@ -78,13 +78,25 @@ extract_mdro_target <- function(lid) {
     target_fn  = NULL
   ),
 
-  # ── FAIR 161 family ─────────────────────────────────────────────────────────
+  # ── Pre-Alert family ────────────────────────────────────────────────────────
   # Format: 161####[<target>][<isolate>]
+  # These older labels can look like FAIR 161 identifiers, but they belong to
+  # Pre-Alert and should not be constrained to the FAIR 618 CP.
   list(
-    pattern    = "^(161)(\\d{4})",
-    study      = "FAIR161",
-    cp_hint    = "FAIR 618",   # same CP as 618 per sample data
+    pattern    = "^(?:PRE[-_ ]?ALERT[-_ ]*)?(161)(\\d{4})",
+    study      = "PRE_ALERT",
+    cp_hint    = "Pre-Alert",
     subject_fn = function(m) paste0("161", m[, 3]),
+    target_fn  = NULL
+  ),
+  # Some legacy Vitek IDs carry an explicit Pre-Alert prefix but do not use
+  # the 161#### convention. Preserve the full matched label as the subject so
+  # exact-label scoring can still do the primary linkage work.
+  list(
+    pattern    = "^(PRE[-_ ]?ALERT(?:[-_ ]?[A-Z0-9]+)+)",
+    study      = "PRE_ALERT",
+    cp_hint    = "Pre-Alert",
+    subject_fn = function(m) m[, 2],
     target_fn  = NULL
   ),
 
@@ -109,9 +121,27 @@ extract_mdro_target <- function(lid) {
     target_fn  = NULL
   ),
 
+  # ── MEPSD family ───────────────────────────────────────────────────────────
+  # MEPSD records may not have an OpenSpecimen parent. Classifying the cohort
+  # still preserves them in no-match/isolate exports without fabricating links.
+  list(
+    pattern    = "^(MEPSD[[:alnum:]_-]+)",
+    study      = "MEPSD",
+    cp_hint    = "MEPSD",
+    subject_fn = function(m) m[, 2],
+    target_fn  = NULL
+  ),
+
   # ── SNT / APPS / React / MW family ──────────────────────────────────────────
   # Patterns observed: MW##-######, APPS####, REACT####
   # subject = the full matched prefix before any MDRO token
+  list(
+    pattern    = "^(SNT[A-Z0-9_-]+)",
+    study      = "SNT",
+    cp_hint    = "SNT/APPS/React",
+    subject_fn = function(m) m[, 2],
+    target_fn  = NULL
+  ),
   list(
     pattern    = "^(MW\\d{2}-\\d{6})",
     study      = "SNT",
