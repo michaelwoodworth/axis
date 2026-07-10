@@ -211,6 +211,10 @@ linkingUI <- function(id) {
 
         # Edit mode toggle
         bslib::input_switch(ns("edit_mode"), "Edit mode", value = FALSE),
+        shiny::actionButton(ns("confirm_selected"), "Confirm selected",
+                            class = "lk-commit-btn"),
+        shiny::actionButton(ns("manual_link"), "Manual link…",
+                            class = "lk-commit-btn"),
         shiny::actionButton(ns("commit_matched"), "Commit matched only (0)",
                             class = "lk-commit-btn")
       ),
@@ -267,6 +271,176 @@ linkingServer <- function(id, app_state) {
       }
     })
 
+    commit_link_rows <- function(rows, method, rationale = "") {
+      if (is.null(rows) || nrow(rows) == 0L) {
+        shiny::showNotification("No link candidate was selected.", type = "warning")
+        return(invisible(NULL))
+      }
+      result <- commit_matched_links(
+        conn              = app_state$db_conn,
+        matched           = rows,
+        batch_id          = app_state$batch_id,
+        vitek_raw         = app_state$vitek_raw,
+        vitek_ast         = app_state$vitek_ast,
+        vitek_unique      = app_state$vitek_unique,
+        specimens         = app_state$specimens,
+        cleaned_overrides = app_state$cleaned_overrides,
+        formats           = c("csv", "xlsx", "duckdb"),
+        match_method      = method,
+        created_by        = "analyst",
+        rationale         = rationale
+      )
+      app_state$links_confirmed   <- result$links_confirmed
+      app_state$cleaned_overrides <- result$cleaned_overrides
+      app_state$cleaned_links     <- result$cleaned_links
+      app_state$cleaned_ast       <- result$cleaned_ast
+      app_state$specimen_dataset  <- result$specimen_dataset
+      app_state$edit_log <- tryCatch(
+        read_table(app_state$db_conn, "edit_log"),
+        error = function(e) app_state$edit_log
+      )
+
+      buckets <- app_state$match_buckets
+      if (!is.null(buckets)) {
+        committed_keys <- rows |>
+          dplyr::select("lab_id", "isolate_number") |>
+          dplyr::distinct()
+        for (bucket_name in intersect(c("matched", "review", "none"), names(buckets))) {
+          if (!is.null(buckets[[bucket_name]]) && nrow(buckets[[bucket_name]]) > 0L) {
+            buckets[[bucket_name]] <- buckets[[bucket_name]] |>
+              dplyr::anti_join(committed_keys, by = c("lab_id", "isolate_number"))
+          }
+        }
+        app_state$match_buckets <- buckets
+      }
+      rv$selected_id <- NULL
+
+      shiny::showNotification(
+        sprintf(
+          "Confirmed %d manual link%s. Exports now contain %d isolate links and %d parent specimens.",
+          result$n_committed,
+          if (result$n_committed == 1L) "" else "s",
+          result$export_info$n_cleaned,
+          result$export_info$n_specimens
+        ),
+        type = "message", duration = 7
+      )
+      invisible(result)
+    }
+
+    shiny::observeEvent(input$confirm_selected, {
+      lid <- rv$selected_id
+      if (is.null(lid) || !startsWith(lid, "staged::")) {
+        shiny::showNotification(
+          "Select a staged needs-review candidate before confirming it.",
+          type = "warning"
+        )
+        return()
+      }
+      selected <- links_data() |>
+        dplyr::filter(.data$link_id == lid)
+      if (nrow(selected) == 0L || !identical(selected$state[[1]], "needs_review")) {
+        shiny::showNotification("The selected row is not a needs-review candidate.", type = "warning")
+        return()
+      }
+      candidate <- app_state$match_candidates |>
+        dplyr::filter(
+          .data$lab_id == selected$lab_id[[1]],
+          .data$isolate_number == selected$isolate_number[[1]],
+          .data$os_identifier == selected$os_identifier[[1]]
+        ) |>
+        dplyr::slice_head(n = 1L)
+      commit_link_rows(candidate, "manual_confirmed", "Confirmed from needs-review queue")
+    })
+
+    shiny::observeEvent(input$manual_link, {
+      buckets <- app_state$match_buckets
+      no_match <- if (!is.null(buckets)) buckets$none else NULL
+      specimens <- app_state$specimens
+      if (is.null(no_match) || nrow(no_match) == 0L) {
+        shiny::showNotification("There are no current no-match Vitek records.", type = "message")
+        return()
+      }
+      if (is.null(specimens) || nrow(specimens) == 0L) {
+        shiny::showNotification("OpenSpecimen records are not loaded.", type = "warning")
+        return()
+      }
+
+      vitek_keys <- paste(no_match$lab_id, no_match$isolate_number, sep = "||")
+      vitek_labels <- sprintf("%s · isolate %s", no_match$lab_id, no_match$isolate_number)
+      os_keep <- !grepl("^aliquot$", trimws(as.character(specimens$type)), ignore.case = TRUE) |
+        trimws(as.character(specimens$type)) == "Cryopreserved Cells"
+      os_choices <- specimens[os_keep & !is.na(specimens$os_identifier), , drop = FALSE]
+      if (nrow(os_choices) == 0L) {
+        shiny::showNotification("No eligible OpenSpecimen match targets are loaded.", type = "warning")
+        return()
+      }
+      os_labels <- sprintf(
+        "%s · %s · %s · %s",
+        os_choices$os_identifier,
+        os_choices$specimen_label,
+        os_choices$cp_short_title,
+        os_choices$type
+      )
+
+      shiny::showModal(shiny::modalDialog(
+        title = "Create a manual Vitek–OpenSpecimen link",
+        shiny::selectizeInput(
+          ns("manual_vitek_key"), "No-match Vitek record",
+          choices = stats::setNames(vitek_keys, vitek_labels),
+          options = list(placeholder = "Search Vitek Lab ID")
+        ),
+        shiny::selectizeInput(
+          ns("manual_os_identifier"), "OpenSpecimen record",
+          choices = stats::setNames(as.character(os_choices$os_identifier), os_labels),
+          options = list(placeholder = "Search identifier, label, CP, or type")
+        ),
+        shiny::textInput(
+          ns("manual_link_reason"), "Reason",
+          placeholder = "Field alias, legacy label, confirmed in source record…"
+        ),
+        footer = shiny::tagList(
+          shiny::modalButton("Cancel"),
+          shiny::actionButton(ns("save_manual_link"), "Confirm manual link", class = "btn-primary")
+        ),
+        easyClose = TRUE
+      ))
+    })
+
+    shiny::observeEvent(input$save_manual_link, {
+      req(input$manual_vitek_key, input$manual_os_identifier)
+      parts <- strsplit(input$manual_vitek_key, "||", fixed = TRUE)[[1]]
+      if (length(parts) != 2L) {
+        shiny::showNotification("The selected Vitek key is invalid.", type = "error")
+        return()
+      }
+      vitek_row <- app_state$vitek_unique |>
+        dplyr::filter(.data$lab_id == parts[[1]], .data$isolate_number == parts[[2]]) |>
+        dplyr::slice_head(n = 1L)
+      specimen_row <- app_state$specimens |>
+        dplyr::filter(.data$os_identifier == input$manual_os_identifier) |>
+        dplyr::slice_head(n = 1L)
+      if (nrow(vitek_row) == 0L || nrow(specimen_row) == 0L) {
+        shiny::showNotification("The selected records are no longer available.", type = "error")
+        return()
+      }
+      candidate <- tibble::tibble(
+        lab_id = as.character(vitek_row$lab_id[[1]]),
+        isolate_number = as.character(vitek_row$isolate_number[[1]]),
+        os_identifier = as.character(specimen_row$os_identifier[[1]]),
+        project_id = as.character(specimen_row$project_id[[1]]),
+        specimen_label = as.character(specimen_row$specimen_label[[1]]),
+        cp_short_title = as.character(specimen_row$cp_short_title[[1]]),
+        score = NA_real_
+      )
+      result <- commit_link_rows(
+        candidate,
+        "manual_selected",
+        trimws(as.character(input$manual_link_reason %||% ""))
+      )
+      if (!is.null(result)) shiny::removeModal()
+    })
+
     # ── Derived data ──────────────────────────────────────────────────────────
 
     # Full joined display table (links × vitek × specimens × overrides counts)
@@ -276,37 +450,43 @@ linkingServer <- function(id, app_state) {
       sp  <- app_state$specimens
       ov  <- app_state$cleaned_overrides
 
-      if (is.null(lc) || nrow(lc) == 0) {
-        return(.augment_link_filters(staged_links_display(app_state), app_state))
-      }
-      lc <- dedup_confirmed_links(lc)
-
-      # Count overrides per link_id
-      ov_counts <- if (!is.null(ov) && nrow(ov) > 0) {
-        ov |>
-          dplyr::group_by(link_id) |>
-          dplyr::summarise(n_edits = dplyr::n(), .groups = "drop")
+      confirmed <- if (!is.null(lc) && nrow(lc) > 0L) {
+        lc <- dedup_confirmed_links(lc)
+        ov_counts <- if (!is.null(ov) && nrow(ov) > 0) {
+          ov |>
+            dplyr::group_by(link_id) |>
+            dplyr::summarise(n_edits = dplyr::n(), .groups = "drop")
+        } else {
+          tibble::tibble(link_id = character(), n_edits = integer())
+        }
+        disagree_flags <- .link_disagreement_flags(app_state$match_candidates)
+        lc |>
+          dplyr::left_join(ov_counts, by = "link_id") |>
+          dplyr::left_join(
+            disagree_flags,
+            by = c("lab_id", "isolate_number", "os_identifier")
+          ) |>
+          dplyr::mutate(
+            n_edits = tidyr::replace_na(.data$n_edits, 0L),
+            conf_pct = round(.data$confidence * 100),
+            disputed = tidyr::replace_na(.data$disputed, FALSE)
+          )
       } else {
-        tibble::tibble(link_id = character(), n_edits = integer())
+        links_empty_display()
       }
 
-      # Field disagreement flags from the exact committed candidate. Confidence
-      # measures linkage strength; disputed means an important reconciled field
-      # differs for that chosen Vitek/OpenSpecimen pair.
-      mc <- app_state$match_candidates
-      disagree_flags <- .link_disagreement_flags(mc)
+      staged <- staged_links_display(app_state)
+      if (nrow(confirmed) > 0L && nrow(staged) > 0L) {
+        staged <- staged |>
+          dplyr::anti_join(
+            confirmed |>
+              dplyr::select("lab_id", "isolate_number", "os_identifier") |>
+              dplyr::distinct(),
+            by = c("lab_id", "isolate_number", "os_identifier")
+          )
+      }
 
-      lc |>
-        dplyr::left_join(ov_counts, by = "link_id") |>
-        dplyr::left_join(
-          disagree_flags,
-          by = c("lab_id", "isolate_number", "os_identifier")
-        ) |>
-        dplyr::mutate(
-          n_edits     = tidyr::replace_na(n_edits, 0L),
-          conf_pct    = round(confidence * 100),
-          disputed    = tidyr::replace_na(disputed, FALSE)
-        ) |>
+      dplyr::bind_rows(confirmed, staged) |>
         .augment_link_filters(app_state)
     })
 
@@ -419,16 +599,18 @@ linkingServer <- function(id, app_state) {
         app_state$cleaned_overrides <- result$cleaned_overrides
         app_state$cleaned_links     <- result$cleaned_links
         app_state$cleaned_ast       <- result$cleaned_ast
+        app_state$specimen_dataset  <- result$specimen_dataset
         rv$selected_id <- NULL
 
         shiny::showNotification(
           sprintf(
-            "%d link%s committed to AXIS_clean_%s from Linking. Exported %d cleaned rows and %d AST rows.",
+            "%d link%s committed to AXIS_clean_%s from Linking. Exported %d isolate links, %d AST rows, and %d parent specimens.",
             result$n_committed,
             if (result$n_committed == 1L) "" else "s",
             app_state$batch_id,
             result$export_info$n_cleaned,
-            result$export_info$n_ast
+            result$export_info$n_ast,
+            result$export_info$n_specimens
           ),
           type = "message",
           duration = 6

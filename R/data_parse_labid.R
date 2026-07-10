@@ -9,7 +9,7 @@
 #   Analysts can add rules without touching this file:
 #     options(axis.labid_rules_extra = list(
 #       list(
-#         pattern    = "^MYID(\d+)",
+#         pattern    = "^MYID(\\d+)",
 #         study      = "MY_STUDY",
 #         cp_hint    = "My CP Title",
 #         subject_fn = function(m) paste0("MYID", m[, 2]),
@@ -59,7 +59,7 @@ extract_mdro_target <- function(lid) {
   # Format: ARG###[<target>][<suffix>]
   # Examples: ARG026ESBL1, ARG038CRE2, ARG007
   list(
-    pattern    = "^(ARG)(\d{3})",
+    pattern    = "^(ARG)(\\d{3})",
     study      = "ARRRRG",
     cp_hint    = "ARRRRG 2.0",
     subject_fn = function(m) paste0("ARG", m[, 3]),
@@ -71,7 +71,7 @@ extract_mdro_target <- function(lid) {
   # The lab_id IS the specimen_label in OpenSpecimen; participant_id = FR01…
   # Examples: 6180011, 6180012ESBL1, 6180013CRE
   list(
-    pattern    = "^(618)(\d{4})",
+    pattern    = "^(618)(\\d{4})",
     study      = "FAIR618",
     cp_hint    = "FAIR 618",
     subject_fn = function(m) paste0("618", m[, 3]),
@@ -83,7 +83,7 @@ extract_mdro_target <- function(lid) {
   # These older labels can look like FAIR 161 identifiers, but they belong to
   # Pre-Alert and should not be constrained to the FAIR 618 CP.
   list(
-    pattern    = "^(?:PRE[-_ ]?ALERT[-_ ]*)?(161)(\d{4})",
+    pattern    = "^(?:PRE[-_ ]?ALERT[-_ ]*)?(161)(\\d{4})",
     study      = "PRE_ALERT",
     cp_hint    = "Pre-Alert",
     subject_fn = function(m) paste0("161", m[, 3]),
@@ -94,7 +94,7 @@ extract_mdro_target <- function(lid) {
   # Format: [ab]AG###[suffix]
   # Examples: aAG001, bAG014ESBL
   list(
-    pattern    = "^([abAB]AG)(\d{3})",
+    pattern    = "^([abAB]AG)(\\d{3})",
     study      = "aAG",
     cp_hint    = NA_character_,
     subject_fn = function(m) paste0(m[, 2], m[, 3]),
@@ -104,10 +104,21 @@ extract_mdro_target <- function(lid) {
   # ── aEM / bEM family ────────────────────────────────────────────────────────
   # Format: [ab]EM###[suffix]
   list(
-    pattern    = "^([abAB]EM)(\d{3})",
+    pattern    = "^([abAB]EM)(\\d{3})",
     study      = "aEM",
     cp_hint    = NA_character_,
     subject_fn = function(m) paste0(m[, 2], m[, 3]),
+    target_fn  = NULL
+  ),
+
+  # ── MEPSD family ───────────────────────────────────────────────────────────
+  # MEPSD records may not have an OpenSpecimen parent. Classifying the cohort
+  # still preserves them in no-match/isolate exports without fabricating links.
+  list(
+    pattern    = "^(MEPSD[[:alnum:]_-]+)",
+    study      = "MEPSD",
+    cp_hint    = "MEPSD",
+    subject_fn = function(m) m[, 2],
     target_fn  = NULL
   ),
 
@@ -115,21 +126,21 @@ extract_mdro_target <- function(lid) {
   # Patterns observed: MW##-######, APPS####, REACT####
   # subject = the full matched prefix before any MDRO token
   list(
-    pattern    = "^(MW\d{2}-\d{6})",
+    pattern    = "^(MW\\d{2}-\\d{6})",
     study      = "SNT",
     cp_hint    = "SNT/APPS/React",
     subject_fn = function(m) m[, 2],
     target_fn  = NULL
   ),
   list(
-    pattern    = "^(APPS\d{4})",
+    pattern    = "^(APPS\\d{4})",
     study      = "SNT",
     cp_hint    = "SNT/APPS/React",
     subject_fn = function(m) m[, 2],
     target_fn  = NULL
   ),
   list(
-    pattern    = "^(REACT\d{4})",
+    pattern    = "^(REACT\\d{4})",
     study      = "SNT",
     cp_hint    = "SNT/APPS/React",
     subject_fn = function(m) m[, 2],

@@ -91,7 +91,7 @@
 .norm_organism <- function(x) {
   raw <- trimws(as.character(x))
   raw[raw %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
-  key <- toupper(gsub("\s+", " ", raw))
+  key <- toupper(gsub("\\s+", " ", raw))
   key <- gsub("_", " ", key)
   norm <- .ORGANISM_NORM[key]
   names(norm) <- NULL
@@ -158,7 +158,12 @@ auto_match <- function(vitek_unique, specimens,
     .Platform$OS.type != "windows" &&
     length(idx) > 1L
   if (is.null(workers)) {
-    workers <- max(1L, parallel::detectCores(logical = TRUE) - 1L)
+    detected_cores <- suppressWarnings(parallel::detectCores(logical = TRUE))
+    if (is.null(detected_cores) || length(detected_cores) == 0L ||
+        is.na(detected_cores[[1]]) || detected_cores[[1]] < 1L) {
+      detected_cores <- 1L
+    }
+    workers <- max(1L, as.integer(detected_cores[[1]]) - 1L)
   }
   workers <- max(1L, min(as.integer(workers), length(idx)))
 
@@ -532,7 +537,7 @@ match_candidates_empty <- function() {
 .organism_genus <- function(x) {
   x <- trimws(as.character(x))
   x[is.na(x)] <- ""
-  sub("\s+.*$", "", x)
+  sub("\\s+.*$", "", x)
 }
 
 .norm_accession_label <- function(x) {

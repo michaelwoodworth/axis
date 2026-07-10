@@ -150,6 +150,16 @@ data/exports/
 
 These files should generally not be committed to GitHub.
 
+After links are committed, AXIS writes three coordinated cleaned outputs:
+
+- `AXIS_clean_<batch>_isolates.csv`: one row per confirmed Vitek–Cryopreserved Cell link;
+- `AXIS_clean_<batch>_isolates_ast.csv`: long antibiotic susceptibility results for those isolates;
+- `AXIS_clean_<batch>_isolates_specimens.csv`: one row per highest available parent specimen, including unlinked parents and MDRO concordance status.
+
+Needs-review candidates can be confirmed from the Linking tab. Records with no
+scored candidate can be linked with **Manual link…**. Both workflows write an
+audited confirmation to the local DuckDB and never modify source exports.
+
 Important OneDrive note: avoid having multiple users run the same `data/axis.duckdb` file from a synced/shared OneDrive folder at the same time. DuckDB uses file locks, and OneDrive syncing can create conflicts. The safest model is:
 
 ```text
