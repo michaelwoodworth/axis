@@ -138,7 +138,7 @@ test_that("specimen dataset follows hierarchy and retains unlinked negative pare
     participant_id = c("1610001", "1610001", "1610001", "1610002"),
     type = c("Stool", "Aliquot", "Cryopreserved Cells", "Stool"),
     class = c("Specimen", "Aliquot", "Aliquot", "Specimen"),
-    custom_mdro = c("ESBL", NA_character_, "ESBL", "Negative"),
+    custom_mdro = c(NA_character_, "ESBL", "ESBL", "Negative"),
     custom_collection_date = as.Date("2025-01-10")
   )
   cleaned <- tibble::tibble(

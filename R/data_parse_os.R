@@ -274,8 +274,11 @@ get_cp_form_map <- function() {
 
 .resolve_os_csv_path <- function(file_path) {
   ext <- tolower(tools::file_ext(file_path))
-  if (ext == "csv") return(file_path)
-  if (ext != "zip") stop("Unsupported OpenSpecimen export type: ", file_path)
+  if (ext %in% c("csv", "xlsx", "xls")) return(file_path)
+  if (ext != "zip") stop(
+    "Unsupported OpenSpecimen export type (expected CSV, ZIP, XLSX, or XLS): ",
+    file_path
+  )
 
   listing <- utils::unzip(file_path, list = TRUE)
   csv_entries <- listing$Name[grepl("\\.csv$", listing$Name, ignore.case = TRUE)]
@@ -289,10 +292,21 @@ get_cp_form_map <- function() {
 }
 
 .read_os_csv <- function(file_path, n_max = Inf) {
-  csv_path <- .resolve_os_csv_path(file_path)
+  resolved_path <- .resolve_os_csv_path(file_path)
+  ext <- tolower(tools::file_ext(resolved_path))
+  if (ext %in% c("xlsx", "xls")) {
+    return(suppressMessages(
+      tibble::as_tibble(readxl::read_excel(
+        resolved_path,
+        n_max = n_max,
+        col_types = "text",
+        .name_repair = "unique_quiet"
+      ))
+    ))
+  }
   suppressMessages(
     readr::read_csv(
-      csv_path,
+      resolved_path,
       n_max = n_max,
       show_col_types = FALSE,
       col_types = readr::cols(.default = readr::col_character())
@@ -551,7 +565,7 @@ scan_os_projects <- function(data_dir) {
 
   if (!dir.exists(data_dir)) return(empty)
 
-  export_files <- list.files(data_dir, pattern = "\\.(csv|zip)$",
+  export_files <- list.files(data_dir, pattern = "\\.(csv|zip|xlsx|xls)$",
                              full.names = TRUE, ignore.case = TRUE)
   if (length(export_files) == 0) return(empty)
 
@@ -579,7 +593,11 @@ scan_os_projects <- function(data_dir) {
   scanned |>
     dplyr::mutate(
       .ext = tolower(tools::file_ext(file_name)),
-      .rank = dplyr::if_else(.ext == "csv", 1L, 2L)
+      .rank = dplyr::case_when(
+        .ext == "csv" ~ 1L,
+        .ext %in% c("xlsx", "xls") ~ 2L,
+        TRUE ~ 3L
+      )
     ) |>
     dplyr::arrange(study_label, n_specimens, .rank) |>
     dplyr::distinct(study_label, n_specimens, .keep_all = TRUE) |>

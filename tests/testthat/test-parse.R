@@ -78,6 +78,29 @@ test_that("OpenSpecimen parser accepts legacy Pre-Alert field aliases", {
   expect_equal(parsed$parent_label[[2]], "1619001")
 })
 
+test_that("OpenSpecimen parser accepts XLSX exports", {
+  testthat::skip_if_not_installed("openxlsx")
+  xlsx <- tempfile(fileext = ".xlsx")
+  fixture <- data.frame(
+    Identifier = c("PA-P1", "PA-I1"),
+    `Specimen Label` = c("1619001", "1619001ESBL1"),
+    `CP Short Title` = "Pre-Alert",
+    Class = c("Specimen", "Aliquot"),
+    Type = c("Stool", "Cryopreserved Cells"),
+    Lineage = c("New", "Derived"),
+    `Parent Specimen Label` = c(NA_character_, "1619001"),
+    `FAIR#Participant ID` = "1619001",
+    `FAIR#MDRO Category` = c("ESBL", "ESBL"),
+    check.names = FALSE
+  )
+  openxlsx::write.xlsx(fixture, xlsx, overwrite = TRUE)
+
+  parsed <- parse_os_specimens(xlsx, project_id = "PRE_ALERT")
+  expect_equal(nrow(parsed), 2L)
+  expect_equal(parsed$cp_short_title, c("Pre-Alert", "Pre-Alert"))
+  expect_equal(parsed$custom_mdro, c("ESBL", "ESBL"))
+})
+
 test_that("Vitek parser reads sample XLSX files and preserves AST", {
   vitek_dir <- .axis_private_data_dir("02.vitek2_exports")
   testthat::skip_if(is.na(vitek_dir), "Private Vitek2 sample exports are not available")

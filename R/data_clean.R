@@ -370,6 +370,10 @@ resolve_specimen_hierarchy <- function(specimens, max_depth = 20L) {
       cp_short_title = as.character(sp$cp_short_title[[i]]),
       specimen_label = as.character(sp$specimen_label[[i]]),
       parent_label = as.character(sp$parent_label[[i]]),
+      record_type = as.character(sp$type[[i]]),
+      record_class = as.character(sp$class[[i]]),
+      record_mdro = as.character(sp$custom_mdro[[i]]),
+      record_collection_date = suppressWarnings(as.Date(sp$custom_collection_date[[i]])),
       hierarchy_depth = depth,
       hierarchy_status = status,
       parent_os_identifier = if (is.null(root_row)) NA_character_ else as.character(root_row$os_identifier[[1]]),
@@ -418,7 +422,12 @@ build_specimen_dataset <- function(cleaned, specimens = NULL) {
       parent_type = .first_export_value(.data$parent_type),
       parent_class = .first_export_value(.data$parent_class),
       parent_collection_date = .first_export_date(.data$parent_collection_date),
-      parent_mdro_categories = .collapse_export_values(.data$parent_mdro),
+      parent_mdro_categories = .collapse_export_values(
+        .data$record_mdro[
+          is.na(.data$record_type) |
+            trimws(as.character(.data$record_type)) != "Cryopreserved Cells"
+        ]
+      ),
       n_open_specimen_records = dplyr::n_distinct(.data$os_identifier),
       max_hierarchy_depth = suppressWarnings(max(.data$hierarchy_depth, na.rm = TRUE)),
       hierarchy_status = .collapse_export_values(.data$hierarchy_status),
@@ -656,7 +665,9 @@ specimen_hierarchy_empty <- function() {
   tibble::tibble(
     os_identifier = character(), project_id = character(),
     cp_short_title = character(), specimen_label = character(),
-    parent_label = character(), hierarchy_depth = integer(),
+    parent_label = character(), record_type = character(),
+    record_class = character(), record_mdro = character(),
+    record_collection_date = as.Date(character()), hierarchy_depth = integer(),
     hierarchy_status = character(), parent_os_identifier = character(),
     parent_specimen_label = character(), parent_participant_id = character(),
     parent_type = character(), parent_class = character(),

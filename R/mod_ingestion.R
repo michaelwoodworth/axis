@@ -302,7 +302,7 @@ ingestionUI <- function(id) {
             tags$span(
               style = sprintf("font-size:11px; color:%s; flex:1; margin-left:6px;",
                               .AX$muted),
-              "one or more .csv/.zip inventory exports"
+              "one or more .csv/.zip/.xlsx/.xls inventory exports"
             )
           ),
           tags$div(class = "ing-panel-bd",
@@ -320,13 +320,13 @@ ingestionUI <- function(id) {
               ),
               tags$div(
                 style = sprintf("font-size:11.5px; color:%s; margin-top:3px;", .AX$muted),
-                "or click to choose one or more .csv/.zip files"
+                "or click to choose one or more .csv/.zip/.xlsx/.xls files"
               ),
               fileInput(
                 ns("os_files"),
                 label       = NULL,
                 multiple    = TRUE,
-                accept      = c(".csv", ".zip"),
+                accept      = c(".csv", ".zip", ".xlsx", ".xls"),
                 buttonLabel = "Choose files",
                 placeholder = ""
               )
@@ -609,7 +609,10 @@ ingestionServer <- function(id, app_state) {
         return(invisible(NULL))
       }
       if (is.null(rv$specimens) || nrow(rv$specimens) == 0L) {
-        showNotification("Upload one or more OpenSpecimen CSV/ZIP exports before automerge.", type = "warning")
+        showNotification(
+          "Upload one or more OpenSpecimen CSV/ZIP/XLSX/XLS exports before automerge.",
+          type = "warning"
+        )
         return(invisible(NULL))
       }
 
