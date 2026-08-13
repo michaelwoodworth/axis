@@ -123,6 +123,12 @@ linkingUI <- function(id) {
                          background:#1f3a5f; color:#fff; font-size:12px;
                          font-weight:600; white-space:nowrap; }
     .lk-commit-btn:hover { background:#162d4a; color:#fff; border-color:#162d4a; }
+    .lk-export-status   { padding:5px 9px; border-radius:6px; font-size:11px;
+                          font-weight:600; white-space:nowrap; }
+    .lk-export-status.pending { background:#fef3c7; color:#92400e;
+                                border:1px solid #fde68a; }
+    .lk-export-status.current { background:#dcfce7; color:#166534;
+                                border:1px solid #bbf7d0; }
     .lk-body           { display:flex; flex:1; overflow:hidden; min-height:0; }
     .lk-table-pane     { flex:1; overflow:auto; padding:16px; }
     .lk-rail           { width:360px; min-width:320px; max-width:400px;
@@ -231,6 +237,9 @@ linkingUI <- function(id) {
         shiny::actionButton(ns("manual_link"), "Manual link…",
                             class = "lk-commit-btn"),
         shiny::actionButton(ns("commit_matched"), "Commit matched only (0)",
+                            class = "lk-commit-btn"),
+        shiny::uiOutput(ns("export_status"), container = shiny::div),
+        shiny::actionButton(ns("rebuild_export"), "Rebuild and export cleaned data",
                             class = "lk-commit-btn")
       ),
 
@@ -291,25 +300,16 @@ linkingServer <- function(id, app_state) {
         shiny::showNotification("No link candidate was selected.", type = "warning")
         return(invisible(NULL))
       }
-      result <- commit_matched_links(
+      result <- record_confirmed_links(
         conn              = app_state$db_conn,
         matched           = rows,
         batch_id          = app_state$batch_id,
-        vitek_raw         = app_state$vitek_raw,
-        vitek_ast         = app_state$vitek_ast,
-        vitek_unique      = app_state$vitek_unique,
-        specimens         = app_state$specimens,
-        cleaned_overrides = app_state$cleaned_overrides,
-        formats           = c("csv", "xlsx", "duckdb"),
         match_method      = method,
         created_by        = "analyst",
         rationale         = rationale
       )
-      app_state$links_confirmed   <- result$links_confirmed
-      app_state$cleaned_overrides <- result$cleaned_overrides
-      app_state$cleaned_links     <- result$cleaned_links
-      app_state$cleaned_ast       <- result$cleaned_ast
-      app_state$specimen_dataset  <- result$specimen_dataset
+      app_state$links_confirmed <- result$links_confirmed
+      if (result$n_committed > 0L) app_state$needs_export <- TRUE
       app_state$edit_log <- tryCatch(
         read_table(app_state$db_conn, "edit_log"),
         error = function(e) app_state$edit_log
@@ -331,13 +331,10 @@ linkingServer <- function(id, app_state) {
       rv$selected_id <- NULL
 
       shiny::showNotification(
-        sprintf(
-          "Confirmed %d manual link%s. Exports now contain %d isolate links and %d parent specimens.",
-          result$n_committed,
-          if (result$n_committed == 1L) "" else "s",
-          result$export_info$n_cleaned,
-          result$export_info$n_specimens
-        ),
+        if (result$n_committed > 0L) sprintf(
+          "Saved %d confirmed link%s. Cleaned outputs need to be rebuilt.",
+          result$n_committed, if (result$n_committed == 1L) "" else "s"
+        ) else "That logical link was already confirmed; no duplicate was saved.",
         type = "message", duration = 7
       )
       invisible(result)
@@ -582,10 +579,6 @@ linkingServer <- function(id, app_state) {
     # Commit from the Linking tab using the same persistence path as Ingestion.
     shiny::observeEvent(input$commit_matched, {
       tryCatch({
-        session$sendCustomMessage(
-          "axis_busy_show",
-          list(text = "Committing matched rows, rebuilding cleaned tables, and refreshing inventory panels.")
-        )
         buckets <- app_state$match_buckets
         matched <- if (!is.null(buckets)) buckets$matched else NULL
         if (is.null(matched) || nrow(matched) == 0) {
@@ -596,34 +589,22 @@ linkingServer <- function(id, app_state) {
           return()
         }
 
-        result <- commit_matched_links(
+        result <- record_confirmed_links(
           conn              = app_state$db_conn,
           matched           = matched,
-          batch_id          = app_state$batch_id,
-          vitek_raw         = app_state$vitek_raw,
-          vitek_ast         = app_state$vitek_ast,
-          vitek_unique      = app_state$vitek_unique,
-          specimens         = app_state$specimens,
-          cleaned_overrides = app_state$cleaned_overrides,
-          formats           = c("csv", "xlsx", "duckdb")
+          batch_id          = app_state$batch_id
         )
 
-        app_state$links_confirmed   <- result$links_confirmed
-        app_state$cleaned_overrides <- result$cleaned_overrides
-        app_state$cleaned_links     <- result$cleaned_links
-        app_state$cleaned_ast       <- result$cleaned_ast
-        app_state$specimen_dataset  <- result$specimen_dataset
+        app_state$links_confirmed <- result$links_confirmed
+        if (result$n_committed > 0L) app_state$needs_export <- TRUE
+        app_state$match_buckets$matched <- matched[0, , drop = FALSE]
         rv$selected_id <- NULL
 
         shiny::showNotification(
           sprintf(
-            "%d link%s committed to AXIS_clean_%s from Linking. Exported %d isolate links, %d AST rows, and %d parent specimens.",
+            "%d link%s saved. Review can continue; rebuild cleaned outputs when ready.",
             result$n_committed,
-            if (result$n_committed == 1L) "" else "s",
-            app_state$batch_id,
-            result$export_info$n_cleaned,
-            result$export_info$n_ast,
-            result$export_info$n_specimens
+            if (result$n_committed == 1L) "" else "s"
           ),
           type = "message",
           duration = 6
@@ -635,6 +616,59 @@ linkingServer <- function(id, app_state) {
           duration = 10
         )
         warning("AXIS linking commit_matched failed: ", e$message)
+      })
+    })
+
+    output$export_status <- shiny::renderUI({
+      if (isTRUE(app_state$needs_export)) {
+        shiny::span(
+          class = "lk-export-status pending",
+          "Confirmations saved · export needs refresh"
+        )
+      } else {
+        shiny::span(
+          class = "lk-export-status current",
+          if (is.null(app_state$last_exported_at)) "No pending export" else "Cleaned export is current"
+        )
+      }
+    })
+
+    shiny::observeEvent(input$rebuild_export, {
+      tryCatch({
+        result <- rebuild_and_export_cleaned_data(
+          conn              = app_state$db_conn,
+          batch_id          = app_state$batch_id,
+          vitek_unique      = app_state$vitek_unique,
+          vitek_ast         = app_state$vitek_ast,
+          specimens         = app_state$specimens,
+          cleaned_overrides = app_state$cleaned_overrides,
+          csv_path          = app_state$cleaned_csv_path,
+          formats           = c("csv", "xlsx", "duckdb")
+        )
+        app_state$links_confirmed   <- result$links_confirmed
+        app_state$cleaned_overrides <- result$cleaned_overrides
+        app_state$cleaned_links     <- result$cleaned_links
+        app_state$cleaned_ast       <- result$cleaned_ast
+        app_state$specimen_dataset  <- result$specimen_dataset
+        app_state$last_exported_at  <- Sys.time()
+        app_state$needs_export      <- FALSE
+
+        shiny::showNotification(
+          sprintf(
+            "Cleaned export refreshed: %d isolate links, %d AST rows, and %d parent specimens.",
+            result$export_info$n_cleaned,
+            result$export_info$n_ast,
+            result$export_info$n_specimens
+          ),
+          type = "message", duration = 7
+        )
+      }, error = function(e) {
+        app_state$needs_export <- TRUE
+        shiny::showNotification(
+          paste("Export failed; confirmations remain saved and you can retry:", e$message),
+          type = "error", duration = 10
+        )
+        warning("AXIS linking rebuild_export failed: ", e$message)
       }, finally = {
         session$sendCustomMessage("axis_busy_hide", list())
       })
@@ -802,6 +836,7 @@ linkingServer <- function(id, app_state) {
         # Reload overrides into app_state
         app_state$cleaned_overrides <- read_table(conn, "cleaned_overrides")
         app_state$edit_log          <- read_table(conn, "edit_log")
+        app_state$needs_export      <- TRUE
 
         rv$pending_edits <- list()
         rv$save_status   <- "saved"

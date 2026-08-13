@@ -584,6 +584,10 @@ ingestionServer <- function(id, app_state) {
       normalize_csv_path(input$cleaned_csv_path, default_cleaned_csv_path())
     })
 
+    observe({
+      app_state$cleaned_csv_path <- cleaned_csv_path()
+    })
+
     review_csv_path <- reactive({
       normalize_csv_path(input$review_csv_path, default_flagged_csv_path("needs_review"))
     })
@@ -633,6 +637,13 @@ ingestionServer <- function(id, app_state) {
         rv$match_candidates  <- cands
         rv$buckets           <- bucket_results(cands, rv$vitek_unique)
 
+        # Persist the immutable source batch once during preparation. Later
+        # manual decisions write links only; retries are idempotent per batch.
+        persist_source_batch_once(
+          rv$db_conn, rv$batch_id,
+          rv$vitek_raw, rv$vitek_ast, rv$specimens
+        )
+
         sel_proj <- rv$available_projects |>
           dplyr::filter(project_id %in% selected_proj_ids())
         rv$proj_summary <- project_match_summary(rv$buckets, sel_proj)
@@ -653,10 +664,6 @@ ingestionServer <- function(id, app_state) {
     # ── Commit → DuckDB ────────────────────────────────────────────────────
     observeEvent(input$commit_matched, {
       tryCatch({
-        session$sendCustomMessage(
-          "axis_busy_show",
-          list(text = "Committing matched rows, rebuilding cleaned tables, and refreshing inventory panels.")
-        )
         req(rv$buckets, rv$db_conn)
         matched <- rv$buckets$matched
         if (is.null(matched) || nrow(matched) == 0) {
@@ -664,33 +671,21 @@ ingestionServer <- function(id, app_state) {
           return()
         }
 
-        result <- commit_matched_links(
+        result <- record_confirmed_links(
           conn              = rv$db_conn,
           matched           = matched,
-          batch_id          = rv$batch_id,
-          vitek_raw         = rv$vitek_raw,
-          vitek_ast         = rv$vitek_ast,
-          vitek_unique      = rv$vitek_unique,
-          specimens         = rv$specimens,
-          cleaned_overrides = app_state$cleaned_overrides,
-          csv_path          = cleaned_csv_path(),
-          formats           = c("csv", "xlsx", "duckdb")
+          batch_id          = rv$batch_id
         )
-        app_state$links_confirmed   <- result$links_confirmed
-        app_state$cleaned_overrides <- result$cleaned_overrides
-        app_state$cleaned_links     <- result$cleaned_links
-        app_state$cleaned_ast       <- result$cleaned_ast
-        app_state$specimen_dataset  <- result$specimen_dataset
+        app_state$links_confirmed <- result$links_confirmed
+        if (result$n_committed > 0L) app_state$needs_export <- TRUE
+        rv$buckets$matched <- matched[0, , drop = FALSE]
+        app_state$match_buckets <- rv$buckets
 
         showNotification(
           sprintf(
-            "%d link%s committed to AXIS_clean_%s. Exported %d isolate links, %d AST rows, and %d parent specimens.",
+            "%d link%s saved. Continue review in Linking, then rebuild cleaned outputs once.",
             result$n_committed,
-            if (result$n_committed == 1L) "" else "s",
-            rv$batch_id,
-            result$export_info$n_cleaned,
-            result$export_info$n_ast,
-            result$export_info$n_specimens
+            if (result$n_committed == 1L) "" else "s"
           ),
           type = "message", duration = 6
         )
@@ -701,8 +696,6 @@ ingestionServer <- function(id, app_state) {
           duration = 10
         )
         warning("AXIS commit_matched failed: ", e$message)
-      }, finally = {
-        session$sendCustomMessage("axis_busy_hide", list())
       })
     })
 

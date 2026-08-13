@@ -238,6 +238,25 @@ write_links <- function(conn, links) {
 
   # Skip rows whose logical link has already been confirmed. link_id is generated
   # per commit, so it cannot by itself prevent repeated commits of the same link.
+  new_links <- .new_logical_links(conn, links)
+
+  if (nrow(new_links) == 0) return(invisible(0L))
+
+  .append_table_aligned(conn, "links_confirmed", new_links)
+  invisible(nrow(new_links))
+}
+
+.new_logical_links <- function(conn, links) {
+  links <- tibble::as_tibble(links)
+  if (nrow(links) == 0L) return(links)
+
+  # Also collapse duplicates staged in the same request. This keeps a bulk
+  # retry from producing duplicate logical links before the database is read.
+  links <- .add_logical_link_key(links) |>
+    dplyr::distinct(
+      .data$.axis_lab_key, .data$.axis_isolate_key, .data$.axis_os_key,
+      .keep_all = TRUE
+    )
   existing <- tryCatch(
     DBI::dbGetQuery(conn, "
       SELECT link_id, lab_id, isolate_number, os_identifier
@@ -245,23 +264,16 @@ write_links <- function(conn, links) {
     "),
     error = function(e) tibble::tibble()
   )
-  new_links <- links
-  if (nrow(existing) > 0) {
+  if (nrow(existing) > 0L) {
     existing_keys <- .add_logical_link_key(existing) |>
-      dplyr::select(.axis_lab_key, .axis_isolate_key, .axis_os_key)
-
-    new_links <- .add_logical_link_key(new_links) |>
+      dplyr::select(".axis_lab_key", ".axis_isolate_key", ".axis_os_key")
+    links <- links |>
       dplyr::anti_join(
         existing_keys,
         by = c(".axis_lab_key", ".axis_isolate_key", ".axis_os_key")
-      ) |>
-      dplyr::select(-dplyr::starts_with(".axis_"))
+      )
   }
-
-  if (nrow(new_links) == 0) return(invisible(0L))
-
-  .append_table_aligned(conn, "links_confirmed", new_links)
-  invisible(nrow(new_links))
+  links |> dplyr::select(-dplyr::starts_with(".axis_"))
 }
 
 #' Write field-level overrides and append to the edit log.
@@ -283,33 +295,44 @@ write_overrides <- function(conn, overrides, edit_log = NULL) {
 #'
 #' These tables are append-only landing tables. Source files remain untouched;
 #' each row is tagged with the AXIS batch id that produced it.
-write_ingested_tables <- function(conn, batch_id,
-                                  vitek_raw = NULL,
-                                  vitek_ast = NULL,
-                                  specimens = NULL) {
+persist_source_batch_once <- function(conn, batch_id,
+                                      vitek_raw = NULL,
+                                      vitek_ast = NULL,
+                                      specimens = NULL) {
   written <- c(vitek_raw = 0L, vitek_ast = 0L, specimens = 0L)
 
-  if (!is.null(vitek_raw) && nrow(vitek_raw) > 0) {
-    tbl <- .with_batch(vitek_raw, batch_id)
-    .append_table_aligned(conn, "vitek_raw", tbl)
-    written[["vitek_raw"]] <- nrow(tbl)
-  }
+  inputs <- list(vitek_raw = vitek_raw, vitek_ast = vitek_ast, specimens = specimens)
+  DBI::dbWithTransaction(conn, {
+    for (table_name in names(inputs)) {
+      value <- inputs[[table_name]]
+      if (is.null(value) || nrow(value) == 0L) next
+      tbl <- .with_batch(value, batch_id)
+      if (identical(table_name, "specimens")) tbl <- .stringify_list_cols(tbl)
 
-  if (!is.null(vitek_ast) && nrow(vitek_ast) > 0) {
-    tbl <- .with_batch(vitek_ast, batch_id)
-    .append_table_aligned(conn, "vitek_ast", tbl)
-    written[["vitek_ast"]] <- nrow(tbl)
-  }
+      existing_n <- DBI::dbGetQuery(
+        conn,
+        paste0(
+          "SELECT COUNT(*) AS n FROM ", DBI::dbQuoteIdentifier(conn, table_name),
+          " WHERE batch_id = ?"
+        ),
+        params = list(batch_id)
+      )$n[[1]]
 
-  if (!is.null(specimens) && nrow(specimens) > 0) {
-    tbl <- .with_batch(specimens, batch_id)
-    tbl <- .stringify_list_cols(tbl)
-    .append_table_aligned(conn, "specimens", tbl)
-    written[["specimens"]] <- nrow(tbl)
-  }
+      if (identical(as.numeric(existing_n), as.numeric(nrow(tbl)))) next
+
+      # A non-zero mismatch means a previous attempt was interrupted. Replace
+      # only this batch inside the transaction so retrying is safe.
+      .replace_batch_rows(conn, table_name, tbl, batch_id)
+      written[[table_name]] <- nrow(tbl)
+    }
+  })
 
   written
 }
+
+# Backwards-compatible alias for callers outside the Shiny workflow. Unlike the
+# former append-only implementation, retries are now idempotent per batch.
+write_ingested_tables <- persist_source_batch_once
 
 #' Write the current cleaned export to DuckDB.
 #'
@@ -400,11 +423,127 @@ build_links_from_matches <- function(matched_tbl, batch_id, created_by = "analys
     )
 }
 
-#' Commit auto-matched links and refresh cleaned exports.
+#' Persist confirmed links without rebuilding cleaned outputs.
 #'
-#' Shared by the Ingestion and Linking modules so the "Commit matched only"
-#' action behaves the same from either tab. Source tables are append-only landing
-#' tables; cleaned exports are rebuilt from confirmed links plus overrides.
+#' Link insertion and its manual-confirmation audit event share one transaction.
+#' Only newly inserted logical links receive an event, making retries safe.
+record_confirmed_links <- function(conn, matched, batch_id,
+                                   match_method = "auto",
+                                   created_by = "analyst",
+                                   rationale = "") {
+  if (is.null(conn)) stop("DuckDB connection is not available.")
+  if (is.null(batch_id) || !nzchar(as.character(batch_id))) {
+    stop("Batch id is not available.")
+  }
+  if (is.null(matched) || nrow(matched) == 0) {
+    stop("No link records are staged to commit.")
+  }
+
+  links <- build_links_from_matches(
+    matched, batch_id,
+    created_by = created_by,
+    match_method = match_method,
+    state = "confirmed"
+  )
+  new_links <- NULL
+  DBI::dbWithTransaction(conn, {
+    new_links <- .new_logical_links(conn, links)
+    if (nrow(new_links) > 0L) {
+      .append_table_aligned(conn, "links_confirmed", new_links)
+      if (!identical(match_method, "auto")) {
+        rationale_text <- if (is.null(rationale) || length(rationale) == 0L ||
+                              is.na(rationale[[1]])) "" else trimws(as.character(rationale[[1]]))
+        audit_rows <- new_links |>
+          dplyr::transmute(
+            event_id = purrr::map_chr(seq_len(dplyr::n()), ~ uuid::UUIDgenerate()),
+            link_id = .data$link_id,
+            event_type = "link.manually_confirmed",
+            field = "link",
+            from_value = "unconfirmed",
+            to_value = paste0(
+              .data$os_identifier,
+              if (nzchar(rationale_text)) paste0(" | ", rationale_text) else ""
+            ),
+            who = created_by,
+            when_ts = lubridate::now()
+          )
+        .append_table_aligned(conn, "edit_log", audit_rows)
+      }
+    }
+  })
+
+  links_confirmed <- tryCatch(
+    read_table(conn, "links_confirmed"),
+    error = function(e) tibble::tibble()
+  )
+
+  list(
+    n_committed = nrow(new_links),
+    inserted_links = new_links,
+    links_confirmed = links_confirmed
+  )
+}
+
+#' Rebuild cleaned in-memory datasets from durable links and overrides.
+rebuild_cleaned_data <- function(conn, vitek_unique, vitek_ast, specimens,
+                                 cleaned_overrides = NULL) {
+  if (is.null(vitek_unique) || nrow(vitek_unique) == 0L ||
+      is.null(specimens) || nrow(specimens) == 0L) {
+    stop("Parsed Vitek and OpenSpecimen data are not available. Run ingestion/automerge first.")
+  }
+
+  links_confirmed <- read_table(conn, "links_confirmed")
+  overrides <- cleaned_overrides
+  if (is.null(overrides)) {
+    overrides <- read_table(conn, "cleaned_overrides")
+  }
+
+  cleaned_links <- build_cleaned(
+    links     = links_confirmed,
+    overrides = overrides,
+    vitek     = vitek_unique,
+    specimens = specimens
+  )
+  cleaned_ast <- build_cleaned_ast(cleaned_links, vitek_ast)
+  specimen_dataset <- build_specimen_dataset(cleaned_links, specimens)
+
+  list(
+    links_confirmed = links_confirmed,
+    cleaned_overrides = overrides,
+    cleaned_links = cleaned_links,
+    cleaned_ast = cleaned_ast,
+    specimen_dataset = specimen_dataset
+  )
+}
+
+#' Rebuild all cleaned datasets and write requested outputs once.
+rebuild_and_export_cleaned_data <- function(conn, batch_id,
+                                            vitek_unique, vitek_ast, specimens,
+                                            cleaned_overrides = NULL,
+                                            csv_path = NULL,
+                                            output_dir = file.path("data", "exports"),
+                                            formats = c("csv", "xlsx", "duckdb")) {
+  rebuilt <- rebuild_cleaned_data(
+    conn, vitek_unique, vitek_ast, specimens, cleaned_overrides
+  )
+  export_info <- export_cleaned_dataset(
+    cleaned     = rebuilt$cleaned_links,
+    cleaned_ast = rebuilt$cleaned_ast,
+    batch_id    = batch_id,
+    specimens   = specimens,
+    specimen_dataset = rebuilt$specimen_dataset,
+    output_dir  = output_dir,
+    csv_path    = csv_path,
+    formats     = formats,
+    conn        = conn
+  )
+  c(rebuilt, list(export_info = export_info))
+}
+
+#' Legacy all-in-one wrapper retained for non-migrated external callers.
+#'
+#' The Shiny confirmation workflow uses the independently testable functions
+#' above so confirmation never triggers source persistence or export.
 commit_matched_links <- function(conn, matched, batch_id,
                                  vitek_raw = NULL,
                                  vitek_ast = NULL,
@@ -417,98 +556,23 @@ commit_matched_links <- function(conn, matched, batch_id,
                                  match_method = "auto",
                                  created_by = "analyst",
                                  rationale = "") {
-  if (is.null(conn)) stop("DuckDB connection is not available.")
-  if (is.null(batch_id) || !nzchar(as.character(batch_id))) {
-    stop("Batch id is not available.")
-  }
-  if (is.null(matched) || nrow(matched) == 0) {
-    stop("No link records are staged to commit.")
-  }
-  if (is.null(vitek_unique) || nrow(vitek_unique) == 0 ||
-      is.null(specimens) || nrow(specimens) == 0) {
-    stop("Parsed Vitek and OpenSpecimen data are not available. Run ingestion/automerge first.")
-  }
-
-  links <- build_links_from_matches(
-    matched, batch_id,
-    created_by = created_by,
-    match_method = match_method,
-    state = "confirmed"
+  written_sources <- persist_source_batch_once(
+    conn, batch_id, vitek_raw, vitek_ast, specimens
   )
-  n <- write_links(conn, links)
-  if (n > 0L && !identical(match_method, "auto")) {
-    rationale_text <- if (is.null(rationale) || length(rationale) == 0L ||
-                          is.na(rationale[[1]])) "" else trimws(as.character(rationale[[1]]))
-    write_overrides(
-      conn,
-      overrides = NULL,
-      edit_log = links |>
-        dplyr::transmute(
-          event_id = purrr::map_chr(seq_len(dplyr::n()), ~ uuid::UUIDgenerate()),
-          link_id = .data$link_id,
-          event_type = "link.manually_confirmed",
-          field = "link",
-          from_value = "unconfirmed",
-          to_value = paste0(
-            .data$os_identifier,
-            if (nzchar(rationale_text)) paste0(" | ", rationale_text) else ""
-          ),
-          who = created_by,
-          when_ts = lubridate::now()
-        )
-    )
-  }
-  written_sources <- c(vitek_raw = 0L, vitek_ast = 0L, specimens = 0L)
-  if (n > 0L) {
-    written_sources <- write_ingested_tables(
-      conn,
-      batch_id  = batch_id,
-      vitek_raw = vitek_raw,
-      vitek_ast = vitek_ast,
-      specimens = specimens
-    )
-  }
-
-  links_confirmed <- tryCatch(
-    read_table(conn, "links_confirmed"),
-    error = function(e) tibble::tibble()
+  confirmed <- record_confirmed_links(
+    conn, matched, batch_id, match_method, created_by, rationale
   )
-  overrides <- cleaned_overrides
-  if (is.null(overrides)) {
-    overrides <- tryCatch(
-      read_table(conn, "cleaned_overrides"),
-      error = function(e) tibble::tibble()
-    )
-  }
-
-  cleaned_links <- build_cleaned(
-    links     = links_confirmed,
-    overrides = overrides,
-    vitek     = vitek_unique,
-    specimens = specimens
-  )
-  cleaned_ast <- build_cleaned_ast(cleaned_links, vitek_ast)
-  specimen_dataset <- build_specimen_dataset(cleaned_links, specimens)
-  export_info <- export_cleaned_dataset(
-    cleaned     = cleaned_links,
-    cleaned_ast = cleaned_ast,
-    batch_id    = batch_id,
-    specimens   = specimens,
-    output_dir  = output_dir,
-    csv_path    = csv_path,
-    formats     = formats,
-    conn        = conn
+  exported <- rebuild_and_export_cleaned_data(
+    conn, batch_id, vitek_unique, vitek_ast, specimens,
+    cleaned_overrides, csv_path, output_dir, formats
   )
 
-  list(
-    n_committed = n,
-    written_sources = written_sources,
-    links_confirmed = links_confirmed,
-    cleaned_overrides = overrides,
-    cleaned_links = cleaned_links,
-    cleaned_ast = cleaned_ast,
-    specimen_dataset = specimen_dataset,
-    export_info = export_info
+  c(
+    list(
+      n_committed = confirmed$n_committed,
+      written_sources = written_sources
+    ),
+    exported
   )
 }
 

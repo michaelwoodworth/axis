@@ -30,3 +30,14 @@ test_that("manual linking handles unavailable specimen data", {
   expect_equal(nrow(manual_link_specimen_choices(NULL)), 0L)
   expect_equal(nrow(manual_link_specimen_choices(tibble::tibble())), 0L)
 })
+
+test_that("linking UI exposes deferred-export status and explicit final action", {
+  testthat::skip_if_not_installed("shiny")
+  testthat::skip_if_not_installed("bslib")
+  testthat::skip_if_not_installed("htmltools")
+
+  html <- htmltools::renderTags(linkingUI("linking"))$html
+
+  expect_match(html, "linking-export_status", fixed = TRUE)
+  expect_match(html, "Rebuild and export cleaned data", fixed = TRUE)
+})

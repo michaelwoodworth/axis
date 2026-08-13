@@ -580,6 +580,8 @@ specimen_link_summary <- function(cleaned, hierarchy) {
 #' @param output_dir Directory for CSV/XLSX outputs.
 #' @param csv_path Optional explicit path for the isolate dataset CSV. When
 #'   supplied, the AST CSV is written beside it using an "_ast.csv" suffix.
+#' @param specimen_dataset Optional prebuilt specimen dataset. Supplying it
+#'   avoids rebuilding the hierarchy during an explicit final export.
 #' @param formats Any of "csv", "xlsx", "duckdb".
 #' @param conn Optional DBI connection for "duckdb" exports.
 #' @return Named list containing output paths and row counts.
@@ -588,7 +590,8 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
                                    output_dir = file.path("data", "exports"),
                                    csv_path = NULL,
                                    formats = c("csv", "xlsx", "duckdb"),
-                                   conn = NULL) {
+                                   conn = NULL,
+                                   specimen_dataset = NULL) {
   formats <- unique(tolower(formats))
   if (!is.null(csv_path) && nzchar(trimws(csv_path))) {
     csv_path <- trimws(csv_path)
@@ -609,7 +612,9 @@ export_cleaned_dataset <- function(cleaned, cleaned_ast, batch_id,
     n_ast = if (is.null(cleaned_ast)) 0L else nrow(cleaned_ast),
     n_specimens = 0L
   )
-  specimen_dataset <- build_specimen_dataset(cleaned, specimens)
+  if (is.null(specimen_dataset)) {
+    specimen_dataset <- build_specimen_dataset(cleaned, specimens)
+  }
   outputs$n_specimens <- nrow(specimen_dataset)
 
   if ("csv" %in% formats) {

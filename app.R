@@ -150,8 +150,8 @@ ui <- bslib::page_navbar(
       document.addEventListener('click', function(ev) {
         var btn = ev.target && ev.target.closest ? ev.target.closest('button') : null;
         if (!btn) return;
-        if (btn.id === 'ingestion-commit_matched' || btn.id === 'linking-commit_matched') {
-          axisBusyOverlay('Committing matched rows, rebuilding cleaned tables, and refreshing inventory panels.');
+        if (btn.id === 'linking-rebuild_export') {
+          axisBusyOverlay('Rebuilding cleaned tables and writing CSV, XLSX, and DuckDB outputs.');
         }
       }, true);
     ")),
@@ -184,6 +184,8 @@ server <- function(input, output, session) {
     cleaned_ast        = NULL,
     cleaned_overrides  = NULL,
     edit_log           = NULL,
+    needs_export       = FALSE,
+    last_exported_at   = NULL,
     db_conn            = NULL   # DuckDB connection, opened by ingestionServer
   )
 
