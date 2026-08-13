@@ -584,6 +584,12 @@ ingestionServer <- function(id, app_state) {
       normalize_csv_path(input$cleaned_csv_path, default_cleaned_csv_path())
     })
 
+    # The cleaned export now runs from the Linking tab, so the destination the
+    # analyst picked here has to travel with the shared application state.
+    observe({
+      app_state$cleaned_csv_path <- cleaned_csv_path()
+    })
+
     review_csv_path <- reactive({
       normalize_csv_path(input$review_csv_path, default_flagged_csv_path("needs_review"))
     })
@@ -640,6 +646,30 @@ ingestionServer <- function(id, app_state) {
         app_state$match_candidates <- cands
         app_state$match_buckets    <- rv$buckets
 
+        # Phase A: the parsed source tables belong to this ingestion batch, so
+        # they are persisted once here — not again on every later confirmation.
+        # force = TRUE replaces this batch's rows, which keeps a re-run after
+        # loading more files (or after a partial failure) free of duplicates.
+        if (!is.null(rv$db_conn)) {
+          tryCatch(
+            persist_source_batch(
+              rv$db_conn,
+              batch_id  = rv$batch_id,
+              vitek_raw = rv$vitek_raw,
+              vitek_ast = rv$vitek_ast,
+              specimens = rv$specimens,
+              force     = TRUE
+            ),
+            error = function(e) {
+              showNotification(
+                paste("Saving source rows for this batch failed:", e$message),
+                type = "error", duration = 10
+              )
+              warning("AXIS persist_source_batch failed: ", e$message)
+            }
+          )
+        }
+
       }, error = function(e) {
         showNotification(paste("Match error:", e$message), type = "error")
       }, finally = {
@@ -651,12 +681,11 @@ ingestionServer <- function(id, app_state) {
     observeEvent(input$rerun_match, run_match())
 
     # ── Commit → DuckDB ────────────────────────────────────────────────────
+    # Phase B: record the auto-matched links and return. The cleaned CSV/XLSX/
+    # DuckDB outputs are refreshed by "Rebuild and export cleaned data" on the
+    # Linking tab, once, after the analyst has finished reviewing.
     observeEvent(input$commit_matched, {
       tryCatch({
-        session$sendCustomMessage(
-          "axis_busy_show",
-          list(text = "Committing matched rows, rebuilding cleaned tables, and refreshing inventory panels.")
-        )
         req(rv$buckets, rv$db_conn)
         matched <- rv$buckets$matched
         if (is.null(matched) || nrow(matched) == 0) {
@@ -664,35 +693,43 @@ ingestionServer <- function(id, app_state) {
           return()
         }
 
-        result <- commit_matched_links(
-          conn              = rv$db_conn,
-          matched           = matched,
-          batch_id          = rv$batch_id,
-          vitek_raw         = rv$vitek_raw,
-          vitek_ast         = rv$vitek_ast,
-          vitek_unique      = rv$vitek_unique,
-          specimens         = rv$specimens,
-          cleaned_overrides = app_state$cleaned_overrides,
-          csv_path          = cleaned_csv_path(),
-          formats           = c("csv", "xlsx", "duckdb")
+        # Defensive: normally already written when auto-match ran.
+        persist_source_batch(
+          rv$db_conn,
+          batch_id  = rv$batch_id,
+          vitek_raw = rv$vitek_raw,
+          vitek_ast = rv$vitek_ast,
+          specimens = rv$specimens
         )
-        app_state$links_confirmed   <- result$links_confirmed
-        app_state$cleaned_overrides <- result$cleaned_overrides
-        app_state$cleaned_links     <- result$cleaned_links
-        app_state$cleaned_ast       <- result$cleaned_ast
-        app_state$specimen_dataset  <- result$specimen_dataset
+
+        result <- confirm_links(
+          conn         = rv$db_conn,
+          matched      = matched,
+          batch_id     = rv$batch_id,
+          match_method = "auto"
+        )
+
+        if (result$n_committed > 0L) {
+          app_state$links_confirmed <- dplyr::bind_rows(
+            app_state$links_confirmed, result$inserted
+          )
+          pending <- app_state$pending_confirmations
+          if (is.null(pending) || is.na(pending)) pending <- 0L
+          app_state$pending_confirmations <- as.integer(pending) + result$n_committed
+          app_state$needs_export <- TRUE
+          app_state$last_export_failed <- FALSE
+        }
 
         showNotification(
           sprintf(
-            "%d link%s committed to AXIS_clean_%s. Exported %d isolate links, %d AST rows, and %d parent specimens.",
+            paste0("%d link%s committed for batch %s. Saved, not yet exported — ",
+                   "run Rebuild and export cleaned data on the Linking tab when ",
+                   "the review is complete."),
             result$n_committed,
             if (result$n_committed == 1L) "" else "s",
-            rv$batch_id,
-            result$export_info$n_cleaned,
-            result$export_info$n_ast,
-            result$export_info$n_specimens
+            rv$batch_id
           ),
-          type = "message", duration = 6
+          type = "message", duration = 8
         )
       }, error = function(e) {
         showNotification(
@@ -701,8 +738,6 @@ ingestionServer <- function(id, app_state) {
           duration = 10
         )
         warning("AXIS commit_matched failed: ", e$message)
-      }, finally = {
-        session$sendCustomMessage("axis_busy_hide", list())
       })
     })
 

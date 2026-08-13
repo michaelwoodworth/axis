@@ -184,6 +184,18 @@ server <- function(input, output, session) {
     cleaned_ast        = NULL,
     cleaned_overrides  = NULL,
     edit_log           = NULL,
+    specimen_dataset   = NULL,
+    batch_id           = NULL,
+
+    # Saved-versus-exported state. Confirmations are written immediately;
+    # CSV/XLSX/DuckDB cleaned outputs are refreshed only by the explicit
+    # "Rebuild and export cleaned data" action, so these flags tell the analyst
+    # when saved work is not yet reflected in the exports.
+    needs_export           = FALSE,
+    pending_confirmations  = 0L,
+    last_export_failed     = FALSE,
+    cleaned_csv_path       = NULL,   # destination chosen on the Ingestion tab
+
     db_conn            = NULL   # DuckDB connection, opened by ingestionServer
   )
 

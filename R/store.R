@@ -60,6 +60,18 @@ init_db_schema <- function(conn) {
     created_by     = "VARCHAR"
   ))
 
+  # Ledger of which source tables have already been persisted for an ingestion
+  # batch. Source persistence happens once per batch (Phase A); manual
+  # confirmations must never append source rows again.
+  DBI::dbExecute(conn, "
+    CREATE TABLE IF NOT EXISTS source_batches (
+      batch_id   VARCHAR,
+      table_name VARCHAR,
+      n_rows     INTEGER,
+      written_at TIMESTAMP
+    )
+  ")
+
   DBI::dbExecute(conn, "
     CREATE TABLE IF NOT EXISTS cleaned_overrides (
       link_id       VARCHAR,
@@ -221,13 +233,17 @@ init_db_schema <- function(conn) {
   invisible(conn)
 }
 
-#' Write matched links to links_confirmed (append, skip duplicate logical links).
+#' Append only the logical links that are not already confirmed.
+#'
+#' Returns the rows that were actually inserted, so callers can build audit
+#' events for new links only. A repeated confirmation of the same
+#' lab_id/isolate_number/os_identifier inserts nothing and returns zero rows.
 #'
 #' @param conn   DBI connection from open_db().
-#' @param links  tibble matching links_confirmed schema (HANDOFF.md §4).
-#' @return Number of rows written.
-write_links <- function(conn, links) {
-  if (is.null(links) || nrow(links) == 0) return(invisible(0L))
+#' @param links  tibble matching links_confirmed schema.
+#' @return tibble of inserted rows (zero rows if everything was a duplicate).
+insert_new_links <- function(conn, links) {
+  if (is.null(links) || nrow(links) == 0) return(links_confirmed_empty())
 
   # Ensure link_id column exists
   if (!"link_id" %in% names(links)) {
@@ -235,6 +251,13 @@ write_links <- function(conn, links) {
       link_id = purrr::map_chr(seq_len(dplyr::n()), ~ uuid::UUIDgenerate())
     )
   }
+
+  # Collapse duplicates inside the incoming batch first, so a single call can
+  # never insert the same logical link twice.
+  new_links <- .add_logical_link_key(links) |>
+    dplyr::distinct(.axis_lab_key, .axis_isolate_key, .axis_os_key,
+                    .keep_all = TRUE) |>
+    dplyr::select(-dplyr::starts_with(".axis_"))
 
   # Skip rows whose logical link has already been confirmed. link_id is generated
   # per commit, so it cannot by itself prevent repeated commits of the same link.
@@ -245,7 +268,6 @@ write_links <- function(conn, links) {
     "),
     error = function(e) tibble::tibble()
   )
-  new_links <- links
   if (nrow(existing) > 0) {
     existing_keys <- .add_logical_link_key(existing) |>
       dplyr::select(.axis_lab_key, .axis_isolate_key, .axis_os_key)
@@ -258,10 +280,32 @@ write_links <- function(conn, links) {
       dplyr::select(-dplyr::starts_with(".axis_"))
   }
 
-  if (nrow(new_links) == 0) return(invisible(0L))
+  if (nrow(new_links) == 0) return(new_links)
 
   .append_table_aligned(conn, "links_confirmed", new_links)
-  invisible(nrow(new_links))
+  new_links
+}
+
+#' Write matched links to links_confirmed (append, skip duplicate logical links).
+#'
+#' Thin count-returning wrapper around insert_new_links().
+#'
+#' @param conn   DBI connection from open_db().
+#' @param links  tibble matching links_confirmed schema (HANDOFF.md §4).
+#' @return Number of rows written.
+write_links <- function(conn, links) {
+  invisible(nrow(insert_new_links(conn, links)))
+}
+
+#' Empty links_confirmed tibble with the canonical column types.
+links_confirmed_empty <- function() {
+  tibble::tibble(
+    link_id        = character(), lab_id = character(), isolate_number = character(),
+    os_identifier  = character(), project_id = character(), specimen_label = character(),
+    cp_short_title = character(), confidence = double(), match_method = character(),
+    state = character(), batch_id = character(),
+    created_at = lubridate::ymd_hms(character()), created_by = character()
+  )
 }
 
 #' Write field-level overrides and append to the edit log.
@@ -374,13 +418,7 @@ close_db <- function(conn) {
 build_links_from_matches <- function(matched_tbl, batch_id, created_by = "analyst",
                                      match_method = "auto", state = "confirmed") {
   if (is.null(matched_tbl) || nrow(matched_tbl) == 0)
-    return(tibble::tibble(
-      link_id        = character(), lab_id = character(), isolate_number = character(),
-      os_identifier  = character(), project_id = character(), specimen_label = character(),
-      cp_short_title = character(), confidence = double(), match_method = character(),
-      state = character(), batch_id = character(),
-      created_at = lubridate::ymd_hms(character()), created_by = character()
-    ))
+    return(links_confirmed_empty())
 
   matched_tbl |>
     dplyr::transmute(
@@ -400,11 +438,299 @@ build_links_from_matches <- function(matched_tbl, batch_id, created_by = "analys
     )
 }
 
-#' Commit auto-matched links and refresh cleaned exports.
+# ─────────────────────────────────────────────────────────────────────────────
+# Confirmation / export workflow
+#
+# The work that used to sit in one commit function is split into four
+# operations so each can be tested — and paid for — on its own:
+#
+#   Phase A  persist_source_batch()        once per ingestion batch
+#   Phase B  confirm_links()               once per analyst decision (cheap)
+#   Phase C  rebuild_cleaned()             in-memory rebuild, no writes
+#            write_cleaned_outputs()       CSV / XLSX / DuckDB, on request
+#            rebuild_and_export_cleaned()  the two above, as one action
+#
+# Confirmations deliberately do not touch source tables or cleaned outputs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#' Phase A — persist an ingestion batch's parsed source tables exactly once.
 #'
-#' Shared by the Ingestion and Linking modules so the "Commit matched only"
-#' action behaves the same from either tab. Source tables are append-only landing
-#' tables; cleaned exports are rebuilt from confirmed links plus overrides.
+#' Source tables are landing tables for the parsed files. They belong to the
+#' ingestion batch, not to any individual linking decision, so they are written
+#' once when the batch is prepared and never again while the analyst reviews.
+#'
+#' The write is idempotent per (batch_id, table): a table already recorded in
+#' `source_batches` for this batch is skipped. Re-persisting a batch (for
+#' example after loading more files, or retrying a partial failure) replaces
+#' that batch's rows rather than appending a second copy, so a retry can never
+#' duplicate rows already written.
+#'
+#' @param conn      DBI connection from open_db().
+#' @param batch_id  Character. Current batch identifier.
+#' @param vitek_raw,vitek_ast,specimens Parsed source tibbles (may be NULL).
+#' @param force     Logical. TRUE re-writes tables already recorded for this
+#'                  batch (replacing their rows). Used when the parsed content
+#'                  of the batch has changed.
+#' @return Named integer vector of rows persisted per table (0 where skipped).
+persist_source_batch <- function(conn, batch_id,
+                                 vitek_raw = NULL,
+                                 vitek_ast = NULL,
+                                 specimens = NULL,
+                                 force = FALSE) {
+  if (is.null(conn)) stop("DuckDB connection is not available.")
+  if (is.null(batch_id) || !nzchar(as.character(batch_id))) {
+    stop("Batch id is not available.")
+  }
+  batch_id <- as.character(batch_id)
+
+  inputs <- list(vitek_raw = vitek_raw, vitek_ast = vitek_ast,
+                 specimens = specimens)
+  written <- c(vitek_raw = 0L, vitek_ast = 0L, specimens = 0L)
+  already <- .persisted_source_tables(conn, batch_id)
+
+  for (nm in names(inputs)) {
+    tbl <- inputs[[nm]]
+    if (is.null(tbl) || nrow(tbl) == 0) next
+    if (nm %in% already && !isTRUE(force)) next
+
+    staged <- .with_batch(tbl, batch_id)
+    if (identical(nm, "specimens")) staged <- .stringify_list_cols(staged)
+
+    # Replace rather than append: makes a retry after a partial failure safe.
+    .replace_batch_rows(conn, nm, staged, batch_id)
+    .record_source_batch(conn, batch_id, nm, nrow(staged))
+    written[[nm]] <- nrow(staged)
+  }
+
+  written
+}
+
+#' Which source tables have already been persisted for this batch?
+.persisted_source_tables <- function(conn, batch_id) {
+  if (!"source_batches" %in% DBI::dbListTables(conn)) return(character())
+  tryCatch(
+    DBI::dbGetQuery(
+      conn,
+      "SELECT DISTINCT table_name FROM source_batches WHERE batch_id = ?",
+      params = list(as.character(batch_id))
+    )[["table_name"]],
+    error = function(e) character()
+  )
+}
+
+.record_source_batch <- function(conn, batch_id, table_name, n_rows) {
+  DBI::dbExecute(
+    conn,
+    "DELETE FROM source_batches WHERE batch_id = ? AND table_name = ?",
+    params = list(as.character(batch_id), as.character(table_name))
+  )
+  .append_table_aligned(conn, "source_batches", tibble::tibble(
+    batch_id   = as.character(batch_id),
+    table_name = as.character(table_name),
+    n_rows     = as.integer(n_rows),
+    written_at = lubridate::now()
+  ))
+  invisible(NULL)
+}
+
+#' Phase B — record one or more confirmed links and their audit events.
+#'
+#' This is the whole cost of an analyst confirmation. It appends the new
+#' logical links, appends one manual-confirmation audit event per *newly
+#' inserted* link, and returns. It does not write source tables, rebuild the
+#' cleaned dataset, or touch CSV/XLSX/DuckDB cleaned outputs.
+#'
+#' Repeating the same confirmation inserts nothing and logs nothing.
+#'
+#' @param conn         DBI connection from open_db().
+#' @param matched      Candidate rows to confirm (as produced by matching, or
+#'                     assembled by the Manual Link dialog).
+#' @param batch_id     Character. Current batch identifier.
+#' @param match_method "auto", "manual_confirmed", or "manual_selected".
+#'                     Audit events are written for the manual methods only.
+#' @param created_by   Character. Analyst / session identifier.
+#' @param rationale    Optional free text stored with the audit event.
+#' @param state        Link state written to links_confirmed.
+#' @return list(n_committed, inserted, links_confirmed)
+confirm_links <- function(conn, matched, batch_id,
+                          match_method = "auto",
+                          created_by = "analyst",
+                          rationale = "",
+                          state = "confirmed") {
+  if (is.null(conn)) stop("DuckDB connection is not available.")
+  if (is.null(batch_id) || !nzchar(as.character(batch_id))) {
+    stop("Batch id is not available.")
+  }
+  if (is.null(matched) || nrow(matched) == 0) {
+    stop("No link records are staged to commit.")
+  }
+
+  links <- build_links_from_matches(
+    matched, batch_id,
+    created_by   = created_by,
+    match_method = match_method,
+    state        = state
+  )
+  inserted <- insert_new_links(conn, links)
+  audit <- NULL
+
+  if (nrow(inserted) > 0L && !identical(match_method, "auto")) {
+    rationale_text <- if (is.null(rationale) || length(rationale) == 0L ||
+                          is.na(rationale[[1]])) "" else trimws(as.character(rationale[[1]]))
+    audit <- inserted |>
+      dplyr::transmute(
+        event_id = purrr::map_chr(seq_len(dplyr::n()), ~ uuid::UUIDgenerate()),
+        link_id = .data$link_id,
+        event_type = "link.manually_confirmed",
+        field = "link",
+        from_value = "unconfirmed",
+        to_value = paste0(
+          .data$os_identifier,
+          if (nzchar(rationale_text)) paste0(" | ", rationale_text) else ""
+        ),
+        who = created_by,
+        when_ts = lubridate::now()
+      )
+    write_overrides(conn, overrides = NULL, edit_log = audit)
+  }
+
+  list(
+    n_committed = nrow(inserted),
+    inserted    = inserted,
+    audit       = audit
+  )
+}
+
+#' Phase C (part 1) — rebuild the cleaned datasets in memory.
+#'
+#' Reads the complete set of confirmed links and the latest overrides, then
+#' rebuilds the cleaned link, AST, and specimen datasets. Writes nothing.
+#'
+#' @param conn         DBI connection from open_db().
+#' @param vitek_unique Deduplicated Vitek isolates for the loaded batch.
+#' @param vitek_ast    Long AST rows for the loaded batch.
+#' @param specimens    Parsed OpenSpecimen records for the loaded batch.
+#' @param links_confirmed,cleaned_overrides Optional pre-read tables; read from
+#'        the database when NULL.
+#' @return list(links_confirmed, cleaned_overrides, cleaned_links, cleaned_ast,
+#'         specimen_dataset)
+rebuild_cleaned <- function(conn,
+                            vitek_unique = NULL,
+                            vitek_ast = NULL,
+                            specimens = NULL,
+                            links_confirmed = NULL,
+                            cleaned_overrides = NULL) {
+  if (is.null(conn)) stop("DuckDB connection is not available.")
+
+  if (is.null(links_confirmed)) {
+    links_confirmed <- tryCatch(
+      read_table(conn, "links_confirmed"),
+      error = function(e) tibble::tibble()
+    )
+  }
+  if (is.null(cleaned_overrides)) {
+    cleaned_overrides <- tryCatch(
+      read_table(conn, "cleaned_overrides"),
+      error = function(e) tibble::tibble()
+    )
+  }
+
+  cleaned_links <- build_cleaned(
+    links     = links_confirmed,
+    overrides = cleaned_overrides,
+    vitek     = vitek_unique,
+    specimens = specimens
+  )
+  cleaned_ast <- build_cleaned_ast(cleaned_links, vitek_ast)
+  specimen_dataset <- build_specimen_dataset(cleaned_links, specimens)
+
+  list(
+    links_confirmed   = links_confirmed,
+    cleaned_overrides = cleaned_overrides,
+    cleaned_links     = cleaned_links,
+    cleaned_ast       = cleaned_ast,
+    specimen_dataset  = specimen_dataset
+  )
+}
+
+#' Phase C (part 2) — write the rebuilt cleaned datasets to the output formats.
+#'
+#' @param conn     DBI connection (required for the "duckdb" format).
+#' @param rebuilt  The list returned by rebuild_cleaned().
+#' @param batch_id Character. Current batch identifier.
+#' @param specimens Parsed OpenSpecimen records, used for specimen hierarchy.
+#' @param output_dir,csv_path,formats As for export_cleaned_dataset().
+#' @return The export_cleaned_dataset() output list.
+write_cleaned_outputs <- function(conn, rebuilt, batch_id,
+                                  specimens = NULL,
+                                  output_dir = file.path("data", "exports"),
+                                  csv_path = NULL,
+                                  formats = c("csv", "xlsx", "duckdb")) {
+  if (is.null(batch_id) || !nzchar(as.character(batch_id))) {
+    stop("Batch id is not available.")
+  }
+  export_cleaned_dataset(
+    cleaned          = rebuilt$cleaned_links,
+    cleaned_ast      = rebuilt$cleaned_ast,
+    batch_id         = batch_id,
+    specimens        = specimens,
+    specimen_dataset = rebuilt$specimen_dataset,
+    output_dir       = output_dir,
+    csv_path         = csv_path,
+    formats          = formats,
+    conn             = conn
+  )
+}
+
+#' Phase C — rebuild the cleaned datasets and write every requested output.
+#'
+#' This is the explicit "Rebuild and export cleaned data" action. It is the only
+#' operation that writes CSV, XLSX, or the cleaned DuckDB tables.
+#'
+#' If the export step fails, the error propagates: confirmed links and audit
+#' events written earlier stay in the database, so the analyst can retry without
+#' reconfirming anything.
+#'
+#' @inheritParams rebuild_cleaned
+#' @param batch_id Character. Current batch identifier.
+#' @param output_dir,csv_path,formats As for export_cleaned_dataset().
+#' @return The rebuild_cleaned() list plus `export_info`.
+rebuild_and_export_cleaned <- function(conn, batch_id,
+                                       vitek_unique = NULL,
+                                       vitek_ast = NULL,
+                                       specimens = NULL,
+                                       links_confirmed = NULL,
+                                       cleaned_overrides = NULL,
+                                       output_dir = file.path("data", "exports"),
+                                       csv_path = NULL,
+                                       formats = c("csv", "xlsx", "duckdb")) {
+  rebuilt <- rebuild_cleaned(
+    conn,
+    vitek_unique      = vitek_unique,
+    vitek_ast         = vitek_ast,
+    specimens         = specimens,
+    links_confirmed   = links_confirmed,
+    cleaned_overrides = cleaned_overrides
+  )
+  export_info <- write_cleaned_outputs(
+    conn, rebuilt,
+    batch_id   = batch_id,
+    specimens  = specimens,
+    output_dir = output_dir,
+    csv_path   = csv_path,
+    formats    = formats
+  )
+  c(rebuilt, list(export_info = export_info))
+}
+
+#' Commit matched links, then rebuild and export in one call.
+#'
+#' Superseded by persist_source_batch() / confirm_links() /
+#' rebuild_and_export_cleaned(), which the application now calls directly so
+#' that a confirmation does not pay for a full export. Retained as a composite
+#' for callers and scripts that still want the old one-shot behaviour; source
+#' persistence is idempotent per batch, so repeated calls no longer multiply
+#' source rows.
 commit_matched_links <- function(conn, matched, batch_id,
                                  vitek_raw = NULL,
                                  vitek_ast = NULL,
@@ -417,98 +743,46 @@ commit_matched_links <- function(conn, matched, batch_id,
                                  match_method = "auto",
                                  created_by = "analyst",
                                  rationale = "") {
-  if (is.null(conn)) stop("DuckDB connection is not available.")
-  if (is.null(batch_id) || !nzchar(as.character(batch_id))) {
-    stop("Batch id is not available.")
-  }
-  if (is.null(matched) || nrow(matched) == 0) {
-    stop("No link records are staged to commit.")
-  }
   if (is.null(vitek_unique) || nrow(vitek_unique) == 0 ||
       is.null(specimens) || nrow(specimens) == 0) {
     stop("Parsed Vitek and OpenSpecimen data are not available. Run ingestion/automerge first.")
   }
 
-  links <- build_links_from_matches(
-    matched, batch_id,
-    created_by = created_by,
+  confirmed <- confirm_links(
+    conn, matched, batch_id,
     match_method = match_method,
-    state = "confirmed"
+    created_by   = created_by,
+    rationale    = rationale
   )
-  n <- write_links(conn, links)
-  if (n > 0L && !identical(match_method, "auto")) {
-    rationale_text <- if (is.null(rationale) || length(rationale) == 0L ||
-                          is.na(rationale[[1]])) "" else trimws(as.character(rationale[[1]]))
-    write_overrides(
-      conn,
-      overrides = NULL,
-      edit_log = links |>
-        dplyr::transmute(
-          event_id = purrr::map_chr(seq_len(dplyr::n()), ~ uuid::UUIDgenerate()),
-          link_id = .data$link_id,
-          event_type = "link.manually_confirmed",
-          field = "link",
-          from_value = "unconfirmed",
-          to_value = paste0(
-            .data$os_identifier,
-            if (nzchar(rationale_text)) paste0(" | ", rationale_text) else ""
-          ),
-          who = created_by,
-          when_ts = lubridate::now()
-        )
-    )
-  }
+
   written_sources <- c(vitek_raw = 0L, vitek_ast = 0L, specimens = 0L)
-  if (n > 0L) {
-    written_sources <- write_ingested_tables(
-      conn,
-      batch_id  = batch_id,
-      vitek_raw = vitek_raw,
-      vitek_ast = vitek_ast,
-      specimens = specimens
+  if (confirmed$n_committed > 0L) {
+    written_sources <- persist_source_batch(
+      conn, batch_id = batch_id,
+      vitek_raw = vitek_raw, vitek_ast = vitek_ast, specimens = specimens
     )
   }
 
-  links_confirmed <- tryCatch(
-    read_table(conn, "links_confirmed"),
-    error = function(e) tibble::tibble()
-  )
-  overrides <- cleaned_overrides
-  if (is.null(overrides)) {
-    overrides <- tryCatch(
-      read_table(conn, "cleaned_overrides"),
-      error = function(e) tibble::tibble()
-    )
-  }
-
-  cleaned_links <- build_cleaned(
-    links     = links_confirmed,
-    overrides = overrides,
-    vitek     = vitek_unique,
-    specimens = specimens
-  )
-  cleaned_ast <- build_cleaned_ast(cleaned_links, vitek_ast)
-  specimen_dataset <- build_specimen_dataset(cleaned_links, specimens)
-  export_info <- export_cleaned_dataset(
-    cleaned     = cleaned_links,
-    cleaned_ast = cleaned_ast,
-    batch_id    = batch_id,
-    specimens   = specimens,
-    output_dir  = output_dir,
-    csv_path    = csv_path,
-    formats     = formats,
-    conn        = conn
+  result <- rebuild_and_export_cleaned(
+    conn, batch_id = batch_id,
+    vitek_unique      = vitek_unique,
+    vitek_ast         = vitek_ast,
+    specimens         = specimens,
+    cleaned_overrides = cleaned_overrides,
+    output_dir        = output_dir,
+    csv_path          = csv_path,
+    formats           = formats
   )
 
   list(
-    n_committed = n,
+    n_committed = confirmed$n_committed,
     written_sources = written_sources,
-    links_confirmed = links_confirmed,
-    cleaned_overrides = overrides,
-    cleaned_links = cleaned_links,
-    cleaned_ast = cleaned_ast,
-    specimen_dataset = specimen_dataset,
-    export_info = export_info
+    links_confirmed = result$links_confirmed,
+    cleaned_overrides = result$cleaned_overrides,
+    cleaned_links = result$cleaned_links,
+    cleaned_ast = result$cleaned_ast,
+    specimen_dataset = result$specimen_dataset,
+    export_info = result$export_info
   )
 }
 
