@@ -70,6 +70,21 @@
 # ── Null-coalescing ───────────────────────────────────────────────────────────
 `%||%` <- function(a, b) if (!is.null(a) && length(a) > 0 && !is.na(a[1]) && a[1] != "") a else b
 
+# Manual linking is an analyst override, so it must expose valid loaded
+# OpenSpecimen records even when they are ordinary aliquots. Automatic matching
+# intentionally excludes banked aliquots to reduce false-positive candidates;
+# reusing that restriction here prevents legitimate typo corrections.
+manual_link_specimen_choices <- function(specimens) {
+  if (is.null(specimens) || !is.data.frame(specimens) ||
+      !"os_identifier" %in% names(specimens)) {
+    return(tibble::tibble())
+  }
+  if (nrow(specimens) == 0L) return(specimens)
+
+  identifier <- trimws(as.character(specimens$os_identifier))
+  specimens[!is.na(identifier) & nzchar(identifier), , drop = FALSE]
+}
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 linkingUI <- function(id) {
@@ -368,9 +383,7 @@ linkingServer <- function(id, app_state) {
 
       vitek_keys <- paste(no_match$lab_id, no_match$isolate_number, sep = "||")
       vitek_labels <- sprintf("%s · isolate %s", no_match$lab_id, no_match$isolate_number)
-      os_keep <- !grepl("^aliquot$", trimws(as.character(specimens$type)), ignore.case = TRUE) |
-        trimws(as.character(specimens$type)) == "Cryopreserved Cells"
-      os_choices <- specimens[os_keep & !is.na(specimens$os_identifier), , drop = FALSE]
+      os_choices <- manual_link_specimen_choices(specimens)
       if (nrow(os_choices) == 0L) {
         shiny::showNotification("No eligible OpenSpecimen match targets are loaded.", type = "warning")
         return()
