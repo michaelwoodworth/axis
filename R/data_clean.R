@@ -19,7 +19,9 @@
 #   o_participant_id, o_custom_collection_date, o_custom_organism, o_custom_mdro,
 #   o_parent_specimen_type, o_class, o_type, o_lineage,
 #   -- Cleaned (authoritative) --
-#   clean_lab_id, clean_organism, clean_specimen_type, clean_mdro_category,
+#   clean_lab_id, clean_organism, clean_organism_genus, clean_organism_species,
+#   clean_organism_subspecies, clean_organism_rank,
+#   clean_specimen_type, clean_mdro_category,
 #   clean_testing_date, clean_participant_id, clean_cp_title,
 #   clean_parent_specimen_type, clean_ast_notes,
 #   -- Flags --
@@ -65,6 +67,7 @@ build_cleaned <- function(links, overrides, vitek, specimens) {
       vitek |>
         dplyr::select(
           lab_id, isolate_number,
+          v_organism_code  = dplyr::any_of("organism_code"),
           v_organism       = organism_name,
           v_specimen_type  = specimen_type,
           v_specimen_source= specimen_source,
@@ -116,6 +119,40 @@ build_cleaned <- function(links, overrides, vitek, specimens) {
   joined <- joined |>
     dplyr::left_join(ov_wide, by = "link_id")
 
+  # ── Step 3b: curated organism names ───────────────────────────────────────
+  # Resolve the VITEK2 organism code to a reviewed, current name. The raw Vitek
+  # name stays in v_organism untouched; only the cleaned columns carry the
+  # curated value.
+  #
+  # Organism needs its own precedence rather than the generic coalesce below,
+  # because a deliberate "no identification" must not fall through to the raw
+  # Vitek string. VITEK's "Low Discrim Organism" resolves to NA with rank
+  # "unidentified", and that NA is the answer — not a gap to fill from elsewhere.
+  if (!"v_organism_code" %in% names(joined)) joined$v_organism_code <- NA_character_
+  curated <- resolve_organism_names(joined$v_organism_code, joined$v_organism)
+
+  .ov_value <- function(df, col) {
+    if (col %in% names(df)) dplyr::na_if(as.character(df[[col]]), "") else NA_character_
+  }
+  organism_override <- .ov_value(joined, "ov_organism")
+  organism_from_os  <- .ov_value(joined, "o_custom_organism")
+  has_vitek_organism <- !is.na(curated$clean_organism_rank)
+
+  curated_organism <- dplyr::case_when(
+    !is.na(organism_override) ~ organism_override,   # analyst edit always wins
+    has_vitek_organism        ~ curated$clean_organism,
+    TRUE                      ~ organism_from_os     # no Vitek organism at all
+  )
+
+  # An analyst override is free text, so the parsed genus/species from the key
+  # no longer describe it. Blanking them keeps a downstream join on
+  # clean_organism_genus from contradicting clean_organism.
+  overridden <- !is.na(organism_override)
+  curated$clean_organism_genus[overridden]      <- NA_character_
+  curated$clean_organism_species[overridden]    <- NA_character_
+  curated$clean_organism_subspecies[overridden] <- NA_character_
+  curated$clean_organism_rank[overridden]       <- "override"
+
   # ── Step 4: coalesce override → vitek → os for each cleaned field ─────────
   .coalesce_field <- function(df, ov_col, v_col, o_col) {
     ov <- if (ov_col %in% names(df)) df[[ov_col]] else NA_character_
@@ -132,8 +169,11 @@ build_cleaned <- function(links, overrides, vitek, specimens) {
     dplyr::mutate(
       clean_lab_id        = .coalesce_field(joined, "ov_lab_id",
                               "lab_id",         "specimen_label"),
-      clean_organism      = .coalesce_field(joined, "ov_organism",
-                              "v_organism",     "o_custom_organism"),
+      clean_organism            = curated_organism,
+      clean_organism_genus      = curated$clean_organism_genus,
+      clean_organism_species    = curated$clean_organism_species,
+      clean_organism_subspecies = curated$clean_organism_subspecies,
+      clean_organism_rank       = curated$clean_organism_rank,
       clean_specimen_type = .coalesce_field(joined, "ov_specimen_type",
                               "v_specimen_type","o_type"),
       clean_mdro_category = .coalesce_field(joined, "ov_mdro_category",
@@ -714,6 +754,7 @@ cleaned_empty <- function() {
     state                    = character(),
     batch_id                 = character(),
     # Vitek
+    v_organism_code          = character(),
     v_organism               = character(),
     v_specimen_type          = character(),
     v_specimen_source        = character(),
@@ -734,6 +775,10 @@ cleaned_empty <- function() {
     # Cleaned
     clean_lab_id             = character(),
     clean_organism           = character(),
+    clean_organism_genus     = character(),
+    clean_organism_species   = character(),
+    clean_organism_subspecies = character(),
+    clean_organism_rank      = character(),
     clean_specimen_type      = character(),
     clean_mdro_category      = character(),
     clean_testing_date       = character(),

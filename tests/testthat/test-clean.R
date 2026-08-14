@@ -2,6 +2,7 @@ library(dplyr)
 library(tibble)
 library(tidyr)
 
+source("../../R/organism_key.R")
 source("../../R/data_clean.R")
 
 test_that("build_cleaned applies latest field overrides over source values", {

@@ -1,0 +1,69 @@
+organism_code,vitek_name_example,clean_organism,clean_organism_genus,clean_organism_species,clean_organism_subspecies,clean_organism_rank,note
+NOSP,Low Discrim Organism,,,,,unidentified,VITEK 'Low Discrim Organism' - no identification made. Never a species.
+PDX,Acinetobacter spp,Acinetobacter sp.,Acinetobacter,,,genus,
+PTX,Aci.baumannii cplx,Acinetobacter baumannii complex,Acinetobacter,,,complex,A. calcoaceticus-baumannii complex; not resolvable to species
+PDB,Aci.baumannii,Acinetobacter baumannii,Acinetobacter,baumannii,,species,
+PDU,Aci.junii,Acinetobacter junii,Acinetobacter,junii,,species,
+PDZ,Aci.pittii,Acinetobacter pittii,Acinetobacter,pittii,,species,Member of the A. baumannii complex
+PDY,Aci.radioresistens,Acinetobacter radioresistens,Acinetobacter,radioresistens,,species,
+PDR,Aci.ursingii,Acinetobacter ursingii,Acinetobacter,ursingii,,species,
+VEH0,Aer.hydro./punctata,Aeromonas hydrophila/caviae group,Aeromonas,,,group,VITEK 'hydrophila/punctata'; A. punctata is a synonym of A. caviae
+VEN,Aer.salmonicida,Aeromonas salmonicida,Aeromonas,salmonicida,,species,
+PHC,Rzb.radiobacter,Agrobacterium radiobacter,Agrobacterium,radiobacter,,species,GENUS CHANGE: Rhizobium radiobacter -> Agrobacterium radiobacter. LPSN lists Rhizobium radiobacter as a synonym 'not recommended for medical use'.
+PPC,Burkhol.cepacia,Burkholderia cepacia complex,Burkholderia,,,complex,VITEK 'Burkhol.cepacia' cannot separate B. cepacia from the wider Bcc; recorded as complex
+PSA,Burkhol.gladioli,Burkholderia gladioli,Burkholderia,gladioli,,species,
+ELC,Citro.amalonaticus,Citrobacter amalonaticus,Citrobacter,amalonaticus,,species,
+ELK,Citro.braakii,Citrobacter braakii,Citrobacter,braakii,,species,
+ELB,Citro.farmeri,Citrobacter farmeri,Citrobacter,farmeri,,species,
+ELE,Citro.freundii,Citrobacter freundii,Citrobacter,freundii,,species,Reported as a species by VITEK; C. freundii is a complex by sequencing
+ELM,Citro.koseri,Citrobacter koseri,Citrobacter,koseri,,species,
+ELW,Citro.werkmanii,Citrobacter werkmanii,Citrobacter,werkmanii,,species,
+ELY,Citro.youngae,Citrobacter youngae,Citrobacter,youngae,,species,
+EECG,Ent.cloacae complex,Enterobacter cloacae complex,Enterobacter,,,complex,VITEK cannot resolve to species within the complex
+EEB,Ent.asburiae,Enterobacter asburiae,Enterobacter,asburiae,,species,Member of the E. cloacae complex
+EEC,Ent.cloacae,Enterobacter cloacae,Enterobacter,cloacae,,species,
+EEF,Ent.cloacae cloacae,Enterobacter cloacae,Enterobacter,cloacae,cloacae,subspecies,
+EGO,Ent.cloac.dissolvens,Enterobacter cloacae,Enterobacter,cloacae,dissolvens,subspecies,
+EEH,Ent.hormaechei,Enterobacter hormaechei,Enterobacter,hormaechei,,species,Member of the E. cloacae complex
+SFX,Enterococcus spp,Enterococcus sp.,Enterococcus,,,genus,
+SFL,Entero.faecalis,Enterococcus faecalis,Enterococcus,faecalis,,species,
+SFF,Entero.faecium,Enterococcus faecium,Enterococcus,faecium,,species,
+ECO,Esch.coli,Escherichia coli,Escherichia,coli,,species,
+EHA,Hafnia alvei,Hafnia alvei,Hafnia,alvei,,species,
+EHP,Hafnia paralvei,Hafnia paralvei,Hafnia,paralvei,,species,
+EKX,Klebsiella spp,Klebsiella sp.,Klebsiella,,,genus,
+EEE,K.aerogenes,Klebsiella aerogenes,Klebsiella,aerogenes,,species,GENUS CHANGE: Enterobacter aerogenes -> Klebsiella aerogenes (Tindall 2017). LoRN correct name.
+EKO,K.oxytoca,Klebsiella oxytoca,Klebsiella,oxytoca,,species,
+EKV,Raou.planticola,Klebsiella planticola,Klebsiella,planticola,,species,GENUS CHANGE: Raoultella planticola -> Klebsiella planticola. LPSN lists Raoultella planticola as a synonym 'not recommended for medical use'. NOTE: this moves the isolate into Klebsiella counts.
+EKP,K.pneum.pneumoniae,Klebsiella pneumoniae,Klebsiella,pneumoniae,pneumoniae,subspecies,
+EKPN,K.pneumoniae,Klebsiella pneumoniae,Klebsiella,pneumoniae,,species,
+EKZ,K.pneum.ozaenae,Klebsiella pneumoniae,Klebsiella,pneumoniae,ozaenae,subspecies,
+ECE,Lecl.adecarboxylata,Leclercia adecarboxylata,Leclercia,adecarboxylata,,species,
+EQE,Morg.morg.morganii,Morganella morganii,Morganella,morganii,morganii,subspecies,
+EQG,Morg.morganii,Morganella morganii,Morganella,morganii,,species,
+PJX,Pandoraea spp,Pandoraea sp.,Pandoraea,,,genus,
+EEA,Pantoea spp,Pantoea sp.,Pantoea,,,genus,
+EPA,Pantoea agglomerans,Pantoea agglomerans,Pantoea,agglomerans,,species,
+EQB,Proteus mirabilis,Proteus mirabilis,Proteus,mirabilis,,species,
+EQS,Prov.stuartii,Providencia stuartii,Providencia,stuartii,,species,
+ECU,Psdes.vulneris,Pseudescherichia vulneris,Pseudescherichia,vulneris,,species,GENUS CHANGE: Escherichia vulneris -> Pseudescherichia vulneris (Alnajar & Gupta 2017). LoRN correct name. VITEK already abbreviates this as 'Psdes.'
+PPA,Ps.aeruginosa,Pseudomonas aeruginosa,Pseudomonas,aeruginosa,,species,
+PPL,Ps.alcaligenes,Pseudomonas alcaligenes,Pseudomonas,alcaligenes,,species,
+PPF,Ps.fluorescens,Pseudomonas fluorescens,Pseudomonas,fluorescens,,species,
+PCA,Ps.luteola,Pseudomonas luteola,Pseudomonas,luteola,,species,Formerly Chryseomonas luteola; Pseudomonas is the current LPSN placement
+PPM,Ps.mendocina,Pseudomonas mendocina,Pseudomonas,mendocina,,species,NO CHANGE: Ectopseudomonas mendocina is an LPSN synonym flagged 'not recommended for medical use'.
+PCB,Ps.oryzihabitans,Pseudomonas oryzihabitans,Pseudomonas,oryzihabitans,,species,Formerly Flavimonas oryzihabitans; Pseudomonas is the current LPSN placement
+PPP,Ps.putida,Pseudomonas putida,Pseudomonas,putida,,species,
+ERT,Ser.fonticola,Serratia fonticola,Serratia,fonticola,,species,
+ERM,Ser.marcescens,Serratia marcescens,Serratia,marcescens,,species,
+PPO,Sphmon.paucimobilis,Sphingomonas paucimobilis,Sphingomonas,paucimobilis,,species,
+MAU,Staph.aureus,Staphylococcus aureus,Staphylococcus,aureus,,species,
+MEP,Staph.epidermidis,Staphylococcus epidermidis,Staphylococcus,epidermidis,,species,
+MLE,Staph.lentus,Staphylococcus lentus,Staphylococcus,lentus,,species,NO CHANGE: Mammaliicoccus lentus (2020) is an LPSN synonym flagged 'not recommended for medical use'.
+MIP,Staph.pseudintermed.,Staphylococcus pseudintermedius,Staphylococcus,pseudintermedius,,species,
+MSA,Staph.saprophyticus,Staphylococcus saprophyticus,Staphylococcus,saprophyticus,,species,
+MWA,Staph.warneri,Staphylococcus warneri,Staphylococcus,warneri,,species,
+PPH,Steno.maltophilia,Stenotrophomonas maltophilia,Stenotrophomonas,maltophilia,,species,
+SMT0,Str.mitis/oralis,Streptococcus mitis/oralis group,Streptococcus,,,group,Viridans group; VITEK cannot separate S. mitis from S. oralis
+SPY,Str.pyogenes,Streptococcus pyogenes,Streptococcus,pyogenes,,species,
+PPS,Ps.stutzeri,Stutzerimonas stutzeri,Stutzerimonas,stutzeri,,species,"GENUS CHANGE: Pseudomonas stutzeri -> Stutzerimonas stutzeri (Lalucat 2022). LoRN correct name, explicitly recommended for medical use."

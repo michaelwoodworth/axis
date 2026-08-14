@@ -2,6 +2,7 @@ library(dplyr)
 library(tibble)
 
 source("../../R/mdro_categories.R")
+source("../../R/organism_key.R")
 source("../../R/data_clean.R")
 source("../../R/mod_inventory.R")
 
