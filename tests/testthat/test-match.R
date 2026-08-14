@@ -154,7 +154,8 @@ test_that("auto_match ignores ARRRRG underscores and REACT case differences", {
 
 test_that("SNT APPS REACT protocol family normalizes known title variants", {
   known_titles <- c(
-    "SNT", "Sentinel", "APPS", "APPS 2", "APPS_2", "APPS _2", "react"
+    "SNT", "Sentinel", "Sentinel-REACT", "APPS", "APPS 2", "APPS_2",
+    "APPS _2", "react"
   )
 
   expect_equal(
@@ -166,6 +167,12 @@ test_that("SNT APPS REACT protocol family normalizes known title variants", {
     "SNT/APPS/React",
     c("FAIR", "ARRRRG", "Pre-Alert", "MEPSD", "unknown", "APPS pilot")
   )))
+})
+
+test_that("Sentinel-REACT overlaps the shared SNT APPS REACT family", {
+  expect_equal(.protocol_family("Sentinel-REACT"), "SNT_APPS_REACT")
+  expect_true(.cp_titles_overlap("SNT/APPS/React", "Sentinel-REACT"))
+  expect_true(.cp_titles_overlap("Sentinel / REACT", "APPS _2"))
 })
 
 test_that("SNT Vitek record can match an APPS 2 cryopreserved cell directly", {

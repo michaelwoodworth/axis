@@ -555,7 +555,10 @@ match_candidates_empty <- function() {
   norm <- .norm_cp_title(x)
   family <- rep(NA_character_, length(norm))
   known_snt_apps_react <- !is.na(norm) & (
-    norm %in% c("SNT", "SENTINEL", "APPS", "REACT", "SNTAPPSREACT") |
+    norm %in% c(
+      "SNT", "SENTINEL", "APPS", "REACT", "SNTAPPSREACT",
+      "SENTINELREACT"
+    ) |
       grepl("^APPS[0-9]+$", norm)
   )
   family[known_snt_apps_react] <- "SNT_APPS_REACT"
