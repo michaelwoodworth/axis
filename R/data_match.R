@@ -193,9 +193,12 @@ auto_match <- function(vitek_unique, specimens,
 #' @param vitek_unique      All deduplicated Vitek rows.
 #' @param thresh_auto       Score ≥ this → auto-matched (default 80).
 #' @param thresh_review     Score ≥ this → needs-review (default 50).
+#' @param ambiguity_margin  A runner-up within this many points of the best
+#'   candidate keeps the isolate in needs-review (default 5).
 #' @return Named list: $matched, $review, $none.
 bucket_results <- function(match_candidates, vitek_unique,
-                            thresh_auto = 80, thresh_review = 50) {
+                            thresh_auto = 80, thresh_review = 50,
+                            ambiguity_margin = 5) {
   empty <- list(
     matched = match_candidates_empty(),
     review  = match_candidates_empty(),
@@ -205,26 +208,43 @@ bucket_results <- function(match_candidates, vitek_unique,
   if (is.null(match_candidates) || nrow(match_candidates) == 0)
     return(empty)
 
-  # Best score per (lab_id, isolate_number) pair
+  ambiguity_margin <- max(0, as.numeric(ambiguity_margin[[1]]))
+
+  # Best score per (lab_id, isolate_number) pair. A close runner-up is kept in
+  # needs-review so row order can never silently decide an uncertain match.
   best <- match_candidates |>
     dplyr::group_by(lab_id, isolate_number) |>
     dplyr::slice_max(score, n = 1L, with_ties = FALSE) |>
     dplyr::ungroup()
 
+  ambiguity <- match_candidates |>
+    dplyr::group_by(lab_id, isolate_number) |>
+    dplyr::summarise(
+      best_score = max(score, na.rm = TRUE),
+      similarly_scored = sum(score >= best_score - ambiguity_margin, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(has_ambiguity = .data$similarly_scored > 1L)
+
   disagreement <- best |>
+    dplyr::left_join(
+      dplyr::select(ambiguity, lab_id, isolate_number, has_ambiguity),
+      by = c("lab_id", "isolate_number")
+    ) |>
     dplyr::mutate(
       has_disagreement = dplyr::coalesce(mdro_disagree, FALSE) |
-        dplyr::coalesce(organism_disagree, FALSE)
+        dplyr::coalesce(organism_disagree, FALSE),
+      has_ambiguity = dplyr::coalesce(.data$has_ambiguity, FALSE)
     )
 
   matched_keys <- disagreement |>
-    dplyr::filter(score >= thresh_auto, !has_disagreement) |>
+    dplyr::filter(score >= thresh_auto, !has_disagreement, !has_ambiguity) |>
     dplyr::select(lab_id, isolate_number)
 
   review_keys <- disagreement |>
     dplyr::filter(
       score >= thresh_review,
-      score < thresh_auto | has_disagreement
+      score < thresh_auto | has_disagreement | has_ambiguity
     ) |>
     dplyr::select(lab_id, isolate_number)
 
@@ -525,13 +545,39 @@ match_candidates_empty <- function() {
   gsub("[^A-Z0-9]+", "", x)
 }
 
+#' Classify recognized collection protocols into stable internal families.
+#'
+#' SNT, Sentinel, APPS (including numbered rounds), and REACT are alternate
+#' protocol titles for the same study family. Unrecognized titles intentionally
+#' remain unclassified so a word such as "APPS" inside an unknown protocol does
+#' not create a cross-cohort match.
+.protocol_family <- function(x) {
+  norm <- .norm_cp_title(x)
+  family <- rep(NA_character_, length(norm))
+  known_snt_apps_react <- !is.na(norm) & (
+    norm %in% c(
+      "SNT", "SENTINEL", "APPS", "REACT", "SNTAPPSREACT",
+      "SENTINELREACT"
+    ) |
+      grepl("^APPS[0-9]+$", norm)
+  )
+  family[known_snt_apps_react] <- "SNT_APPS_REACT"
+  family
+}
+
 .cp_titles_overlap <- function(hint, cp) {
   hint_norm <- .norm_cp_title(hint)
   cp_norm <- .norm_cp_title(cp)
-  mapply(function(h, c) {
+  hint_family <- .protocol_family(hint)
+  cp_family <- .protocol_family(cp)
+
+  mapply(function(h, c, hf, cf) {
     if (is.na(h) || h == "" || is.na(c) || c == "") return(FALSE)
+    if (!is.na(hf) || !is.na(cf)) {
+      return(!is.na(hf) && !is.na(cf) && hf == cf)
+    }
     grepl(h, c, fixed = TRUE) || grepl(c, h, fixed = TRUE)
-  }, hint_norm, cp_norm)
+  }, hint_norm, cp_norm, hint_family, cp_family)
 }
 
 .organism_genus <- function(x) {
