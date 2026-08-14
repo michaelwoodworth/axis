@@ -30,3 +30,27 @@ test_that("manual linking handles unavailable specimen data", {
   expect_equal(nrow(manual_link_specimen_choices(NULL)), 0L)
   expect_equal(nrow(manual_link_specimen_choices(tibble::tibble())), 0L)
 })
+
+test_that("the saved-versus-exported indicator distinguishes the three states", {
+  fresh <- export_state_message(0L, FALSE)
+  expect_equal(fresh$state, "current")
+  expect_match(fresh$label, "No changes waiting")
+
+  one <- export_state_message(1L, FALSE)
+  expect_equal(one$state, "stale")
+  expect_match(one$label, "^1 change saved")
+
+  many <- export_state_message(20L, FALSE)
+  expect_equal(many$state, "stale")
+  expect_match(many$label, "^20 changes saved")
+
+  failed <- export_state_message(3L, TRUE)
+  expect_equal(failed$state, "failed")
+  expect_match(failed$label, "Export failed")
+  expect_match(failed$label, "3 saved changes")
+})
+
+test_that("the indicator tolerates missing or malformed counts", {
+  expect_equal(export_state_message(NA_integer_, FALSE)$state, "current")
+  expect_equal(export_state_message(-4L, FALSE)$state, "current")
+})

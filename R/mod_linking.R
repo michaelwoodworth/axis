@@ -70,6 +70,43 @@
 # ── Null-coalescing ───────────────────────────────────────────────────────────
 `%||%` <- function(a, b) if (!is.null(a) && length(a) > 0 && !is.na(a[1]) && a[1] != "") a else b
 
+#' Describe whether the cleaned export is current or stale.
+#'
+#' Pure helper so the saved-versus-exported wording can be tested without a
+#' running Shiny session.
+#'
+#' @param pending_confirmations Integer. Confirmations and edits saved since the
+#'   last successful export.
+#' @param last_export_failed Logical. TRUE after a failed export attempt.
+#' @return list(state, label) where state is "current", "stale", or "failed".
+export_state_message <- function(pending_confirmations = 0L,
+                                 last_export_failed = FALSE) {
+  n <- suppressWarnings(as.integer(pending_confirmations))
+  if (is.na(n) || n < 0L) n <- 0L
+
+  if (isTRUE(last_export_failed)) {
+    return(list(
+      state = "failed",
+      label = sprintf(
+        "Export failed — %d saved change%s still not exported",
+        n, if (n == 1L) "" else "s"
+      )
+    ))
+  }
+  if (n == 0L) {
+    # True both before anything has been confirmed and after a successful
+    # export, without claiming an export has happened when it has not.
+    return(list(state = "current", label = "No changes waiting to be exported"))
+  }
+  list(
+    state = "stale",
+    label = sprintf(
+      "%d change%s saved, not yet exported",
+      n, if (n == 1L) "" else "s"
+    )
+  )
+}
+
 # Manual linking is an analyst override, so it must expose valid loaded
 # OpenSpecimen records even when they are ordinary aliquots. Automatic matching
 # intentionally excludes banked aliquots to reduce false-positive candidates;
@@ -123,6 +160,17 @@ linkingUI <- function(id) {
                          background:#1f3a5f; color:#fff; font-size:12px;
                          font-weight:600; white-space:nowrap; }
     .lk-commit-btn:hover { background:#162d4a; color:#fff; border-color:#162d4a; }
+    .lk-export-btn      { padding:6px 12px; border-radius:7px; border:1px solid #b45309;
+                         background:#fff; color:#b45309; font-size:12px;
+                         font-weight:600; white-space:nowrap; }
+    .lk-export-btn:hover { background:#fef3c7; color:#78350f; border-color:#78350f; }
+    .lk-export-state    { display:inline-flex; align-items:center; gap:6px;
+                         padding:3px 10px; border-radius:12px; font-size:11.5px;
+                         font-weight:600; white-space:nowrap; }
+    .lk-export-state.stale   { background:#fef3c7; color:#92400e;
+                               border:1px solid #fde68a; }
+    .lk-export-state.current { background:#dcfce7; color:#15803d;
+                               border:1px solid #bbf7d0; }
     .lk-body           { display:flex; flex:1; overflow:hidden; min-height:0; }
     .lk-table-pane     { flex:1; overflow:auto; padding:16px; }
     .lk-rail           { width:360px; min-width:320px; max-width:400px;
@@ -231,7 +279,10 @@ linkingUI <- function(id) {
         shiny::actionButton(ns("manual_link"), "Manual link…",
                             class = "lk-commit-btn"),
         shiny::actionButton(ns("commit_matched"), "Commit matched only (0)",
-                            class = "lk-commit-btn")
+                            class = "lk-commit-btn"),
+        shiny::actionButton(ns("rebuild_export"), "Rebuild and export cleaned data",
+                            class = "lk-export-btn"),
+        shiny::uiOutput(ns("export_state"), inline = TRUE)
       ),
 
       # ── Body: DT left + detail rail right ───────────────────────────────────
@@ -286,58 +337,81 @@ linkingServer <- function(id, app_state) {
       }
     })
 
+    # Phase B: a confirmation writes the link and its audit event, updates the
+    # visible state, and returns. Source tables were persisted once for the
+    # batch during ingestion; CSV/XLSX/DuckDB cleaned outputs are rebuilt only
+    # by the explicit "Rebuild and export cleaned data" action.
+    mark_needs_export <- function(n_new = 1L) {
+      current <- app_state$pending_confirmations
+      if (is.null(current) || is.na(current)) current <- 0L
+      app_state$pending_confirmations <- as.integer(current) + as.integer(n_new)
+      app_state$needs_export <- TRUE
+      app_state$last_export_failed <- FALSE
+      invisible(NULL)
+    }
+
+    drop_committed_from_buckets <- function(rows) {
+      buckets <- app_state$match_buckets
+      if (is.null(buckets)) return(invisible(NULL))
+      committed_keys <- rows |>
+        dplyr::select("lab_id", "isolate_number") |>
+        dplyr::distinct()
+      for (bucket_name in intersect(c("matched", "review", "none"), names(buckets))) {
+        if (!is.null(buckets[[bucket_name]]) && nrow(buckets[[bucket_name]]) > 0L) {
+          buckets[[bucket_name]] <- buckets[[bucket_name]] |>
+            dplyr::anti_join(committed_keys, by = c("lab_id", "isolate_number"))
+        }
+      }
+      app_state$match_buckets <- buckets
+      invisible(NULL)
+    }
+
     commit_link_rows <- function(rows, method, rationale = "") {
       if (is.null(rows) || nrow(rows) == 0L) {
         shiny::showNotification("No link candidate was selected.", type = "warning")
         return(invisible(NULL))
       }
-      result <- commit_matched_links(
-        conn              = app_state$db_conn,
-        matched           = rows,
-        batch_id          = app_state$batch_id,
-        vitek_raw         = app_state$vitek_raw,
-        vitek_ast         = app_state$vitek_ast,
-        vitek_unique      = app_state$vitek_unique,
-        specimens         = app_state$specimens,
-        cleaned_overrides = app_state$cleaned_overrides,
-        formats           = c("csv", "xlsx", "duckdb"),
-        match_method      = method,
-        created_by        = "analyst",
-        rationale         = rationale
-      )
-      app_state$links_confirmed   <- result$links_confirmed
-      app_state$cleaned_overrides <- result$cleaned_overrides
-      app_state$cleaned_links     <- result$cleaned_links
-      app_state$cleaned_ast       <- result$cleaned_ast
-      app_state$specimen_dataset  <- result$specimen_dataset
-      app_state$edit_log <- tryCatch(
-        read_table(app_state$db_conn, "edit_log"),
-        error = function(e) app_state$edit_log
-      )
-
-      buckets <- app_state$match_buckets
-      if (!is.null(buckets)) {
-        committed_keys <- rows |>
-          dplyr::select("lab_id", "isolate_number") |>
-          dplyr::distinct()
-        for (bucket_name in intersect(c("matched", "review", "none"), names(buckets))) {
-          if (!is.null(buckets[[bucket_name]]) && nrow(buckets[[bucket_name]]) > 0L) {
-            buckets[[bucket_name]] <- buckets[[bucket_name]] |>
-              dplyr::anti_join(committed_keys, by = c("lab_id", "isolate_number"))
-          }
+      result <- tryCatch(
+        confirm_links(
+          conn         = app_state$db_conn,
+          matched      = rows,
+          batch_id     = app_state$batch_id,
+          match_method = method,
+          created_by   = "analyst",
+          rationale    = rationale
+        ),
+        error = function(e) {
+          shiny::showNotification(paste("Confirmation failed:", e$message),
+                                  type = "error", duration = 10)
+          NULL
         }
-        app_state$match_buckets <- buckets
+      )
+      if (is.null(result)) return(invisible(NULL))
+
+      if (result$n_committed > 0L) {
+        app_state$links_confirmed <- dplyr::bind_rows(
+          app_state$links_confirmed, result$inserted
+        )
+        if (!is.null(result$audit) && nrow(result$audit) > 0L) {
+          app_state$edit_log <- dplyr::bind_rows(app_state$edit_log, result$audit)
+        }
+        mark_needs_export(result$n_committed)
       }
+
+      drop_committed_from_buckets(rows)
       rv$selected_id <- NULL
 
       shiny::showNotification(
-        sprintf(
-          "Confirmed %d manual link%s. Exports now contain %d isolate links and %d parent specimens.",
-          result$n_committed,
-          if (result$n_committed == 1L) "" else "s",
-          result$export_info$n_cleaned,
-          result$export_info$n_specimens
-        ),
+        if (result$n_committed > 0L) {
+          sprintf(
+            paste0("Confirmed %d link%s. Saved to AXIS, not yet exported — ",
+                   "use Rebuild and export cleaned data when the review is done."),
+            result$n_committed,
+            if (result$n_committed == 1L) "" else "s"
+          )
+        } else {
+          "That link was already confirmed. Nothing new was saved."
+        },
         type = "message", duration = 7
       )
       invisible(result)
@@ -581,31 +655,54 @@ linkingServer <- function(id, app_state) {
 
     # Commit from the Linking tab using the same persistence path as Ingestion.
     shiny::observeEvent(input$commit_matched, {
+      buckets <- app_state$match_buckets
+      matched <- if (!is.null(buckets)) buckets$matched else NULL
+      if (is.null(matched) || nrow(matched) == 0) {
+        shiny::showNotification(
+          "No staged auto-matched records to commit. Run automerge in Ingestion first.",
+          type = "warning"
+        )
+        return()
+      }
+      commit_link_rows(matched, "auto")
+    })
+
+    # ── Phase C: the one action that rebuilds and writes cleaned outputs ──────
+    shiny::observeEvent(input$rebuild_export, {
+      # The click handler in app.R raises the busy overlay as soon as this
+      # button is pressed, so every exit from here must take it back down.
+      if (is.null(app_state$db_conn)) {
+        session$sendCustomMessage("axis_busy_hide", list())
+        shiny::showNotification("The AXIS database is not open.", type = "error")
+        return()
+      }
+      if (is.null(app_state$vitek_unique) || nrow(app_state$vitek_unique) == 0L ||
+          is.null(app_state$specimens) || nrow(app_state$specimens) == 0L) {
+        session$sendCustomMessage("axis_busy_hide", list())
+        shiny::showNotification(
+          "Parsed Vitek and OpenSpecimen data are not loaded. Run ingestion first.",
+          type = "warning"
+        )
+        return()
+      }
+
       tryCatch({
         session$sendCustomMessage(
           "axis_busy_show",
-          list(text = "Committing matched rows, rebuilding cleaned tables, and refreshing inventory panels.")
+          list(text = paste(
+            "Rebuilding cleaned link, AST, and specimen datasets and writing",
+            "CSV, XLSX, and DuckDB outputs. This can take a while on a large batch."
+          ))
         )
-        buckets <- app_state$match_buckets
-        matched <- if (!is.null(buckets)) buckets$matched else NULL
-        if (is.null(matched) || nrow(matched) == 0) {
-          shiny::showNotification(
-            "No staged auto-matched records to commit. Run automerge in Ingestion first.",
-            type = "warning"
-          )
-          return()
-        }
 
-        result <- commit_matched_links(
-          conn              = app_state$db_conn,
-          matched           = matched,
-          batch_id          = app_state$batch_id,
-          vitek_raw         = app_state$vitek_raw,
-          vitek_ast         = app_state$vitek_ast,
-          vitek_unique      = app_state$vitek_unique,
-          specimens         = app_state$specimens,
-          cleaned_overrides = app_state$cleaned_overrides,
-          formats           = c("csv", "xlsx", "duckdb")
+        result <- rebuild_and_export_cleaned(
+          conn         = app_state$db_conn,
+          batch_id     = app_state$batch_id,
+          vitek_unique = app_state$vitek_unique,
+          vitek_ast    = app_state$vitek_ast,
+          specimens    = app_state$specimens,
+          csv_path     = app_state$cleaned_csv_path,
+          formats      = c("csv", "xlsx", "duckdb")
         )
 
         app_state$links_confirmed   <- result$links_confirmed
@@ -613,31 +710,45 @@ linkingServer <- function(id, app_state) {
         app_state$cleaned_links     <- result$cleaned_links
         app_state$cleaned_ast       <- result$cleaned_ast
         app_state$specimen_dataset  <- result$specimen_dataset
-        rv$selected_id <- NULL
+
+        # Only a fully successful export clears the "needs export" state.
+        app_state$pending_confirmations <- 0L
+        app_state$needs_export <- FALSE
+        app_state$last_export_failed <- FALSE
 
         shiny::showNotification(
           sprintf(
-            "%d link%s committed to AXIS_clean_%s from Linking. Exported %d isolate links, %d AST rows, and %d parent specimens.",
-            result$n_committed,
-            if (result$n_committed == 1L) "" else "s",
-            app_state$batch_id,
+            "Cleaned export rebuilt for %s: %d isolate links, %d AST rows, %d parent specimens.",
+            app_state$batch_id %||% "this batch",
             result$export_info$n_cleaned,
             result$export_info$n_ast,
             result$export_info$n_specimens
           ),
-          type = "message",
-          duration = 6
+          type = "message", duration = 8
         )
       }, error = function(e) {
+        # Confirmed links and audit events stay in the database; the analyst can
+        # retry the export without reconfirming anything.
+        app_state$needs_export <- TRUE
+        app_state$last_export_failed <- TRUE
         shiny::showNotification(
-          paste("Commit failed:", e$message),
-          type = "error",
-          duration = 10
+          paste0("Export failed: ", e$message,
+                 " Confirmed links are still saved. You can retry the export."),
+          type = "error", duration = 12
         )
-        warning("AXIS linking commit_matched failed: ", e$message)
+        warning("AXIS linking rebuild_export failed: ", e$message)
       }, finally = {
         session$sendCustomMessage("axis_busy_hide", list())
       })
+    })
+
+    output$export_state <- shiny::renderUI({
+      status <- export_state_message(
+        pending_confirmations = app_state$pending_confirmations %||% 0L,
+        last_export_failed    = isTRUE(app_state$last_export_failed)
+      )
+      cls <- if (identical(status$state, "current")) "current" else "stale"
+      shiny::tags$span(class = paste("lk-export-state", cls), status$label)
     })
 
     # ── DT table ──────────────────────────────────────────────────────────────
@@ -802,6 +913,10 @@ linkingServer <- function(id, app_state) {
         # Reload overrides into app_state
         app_state$cleaned_overrides <- read_table(conn, "cleaned_overrides")
         app_state$edit_log          <- read_table(conn, "edit_log")
+
+        # Overrides change the cleaned dataset, so the export is stale until the
+        # analyst runs "Rebuild and export cleaned data".
+        if (nrow(overrides) > 0L) mark_needs_export(nrow(overrides))
 
         rv$pending_edits <- list()
         rv$save_status   <- "saved"
