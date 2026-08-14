@@ -122,6 +122,70 @@ manual_link_specimen_choices <- function(specimens) {
   specimens[!is.na(identifier) & nzchar(identifier), , drop = FALSE]
 }
 
+# How many matches the Manual Link dropdowns render at once. selectize's own
+# default is 1000, which on a full specimen load silently hid every collection
+# protocol after the first ~1000 records in file order. A smaller, stated limit
+# is honest: these are search boxes, and the caption says so.
+.LK_MAX_DROPDOWN_OPTIONS <- 50L
+
+#' Search labels for the Manual Link OpenSpecimen dropdown.
+#'
+#' One label per eligible record, carrying identifier, specimen label,
+#' collection protocol, and specimen type so any of them can be searched.
+#'
+#' @param specimens Loaded OpenSpecimen records.
+#' @return Named character vector: names are the labels shown, values are the
+#'   os_identifier values submitted.
+manual_link_os_choices <- function(specimens) {
+  choices <- manual_link_specimen_choices(specimens)
+  if (is.null(choices) || nrow(choices) == 0L) return(stats::setNames(character(), character()))
+
+  col <- function(nm) {
+    if (nm %in% names(choices)) as.character(choices[[nm]]) else rep(NA_character_, nrow(choices))
+  }
+  labels <- sprintf(
+    "%s · %s · %s · %s",
+    col("os_identifier"), col("specimen_label"), col("cp_short_title"), col("type")
+  )
+  stats::setNames(as.character(choices$os_identifier), labels)
+}
+
+#' Count eligible Manual Link targets per collection protocol.
+#'
+#' Shown in the Manual Link dialog so an analyst can see at a glance which
+#' cohorts are actually loaded. A protocol missing from this line is a protocol
+#' whose export has not been uploaded — which is otherwise indistinguishable
+#' from a record the dropdown will not show.
+#'
+#' @param specimens Loaded OpenSpecimen records.
+#' @return Single string, e.g. "11,540 records loaded · ARRRRG 2.0 668,
+#'   FAIR 618 2,598, REACT 7,770, SNT/APPS/React 504".
+manual_link_os_summary <- function(specimens) {
+  choices <- manual_link_specimen_choices(specimens)
+  if (is.null(choices) || nrow(choices) == 0L) {
+    return("No eligible OpenSpecimen records are loaded.")
+  }
+
+  protocols <- if ("cp_short_title" %in% names(choices)) {
+    trimws(as.character(choices$cp_short_title))
+  } else {
+    rep(NA_character_, nrow(choices))
+  }
+  protocols[is.na(protocols) | !nzchar(protocols)] <- "(no collection protocol)"
+
+  counts <- sort(table(protocols), decreasing = TRUE)
+  detail <- paste(
+    sprintf("%s %s", names(counts), format(as.integer(counts), big.mark = ",", trim = TRUE)),
+    collapse = ", "
+  )
+  sprintf(
+    "%s record%s loaded · %s",
+    format(nrow(choices), big.mark = ",", trim = TRUE),
+    if (nrow(choices) == 1L) "" else "s",
+    detail
+  )
+}
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 linkingUI <- function(id) {
@@ -171,6 +235,8 @@ linkingUI <- function(id) {
                                border:1px solid #fde68a; }
     .lk-export-state.current { background:#dcfce7; color:#15803d;
                                border:1px solid #bbf7d0; }
+    .lk-modal-note      { font-size:11.5px; color:#6b7280; line-height:1.5;
+                          margin:-6px 0 14px; }
     .lk-body           { display:flex; flex:1; overflow:hidden; min-height:0; }
     .lk-table-pane     { flex:1; overflow:auto; padding:16px; }
     .lk-rail           { width:360px; min-width:320px; max-width:400px;
@@ -455,32 +521,46 @@ linkingServer <- function(id, app_state) {
         return()
       }
 
-      vitek_keys <- paste(no_match$lab_id, no_match$isolate_number, sep = "||")
-      vitek_labels <- sprintf("%s · isolate %s", no_match$lab_id, no_match$isolate_number)
-      os_choices <- manual_link_specimen_choices(specimens)
-      if (nrow(os_choices) == 0L) {
+      vitek_choices <- stats::setNames(
+        paste(no_match$lab_id, no_match$isolate_number, sep = "||"),
+        sprintf("%s · isolate %s", no_match$lab_id, no_match$isolate_number)
+      )
+      os_options <- manual_link_os_choices(specimens)
+      if (length(os_options) == 0L) {
         shiny::showNotification("No eligible OpenSpecimen match targets are loaded.", type = "warning")
         return()
       }
-      os_labels <- sprintf(
-        "%s · %s · %s · %s",
-        os_choices$os_identifier,
-        os_choices$specimen_label,
-        os_choices$cp_short_title,
-        os_choices$type
-      )
 
+      # These dropdowns are search boxes, not browsable lists. selectize renders
+      # at most `maxOptions` entries, so an unsearched list of 11,000+ specimens
+      # showed only the first 1,000 in file order — every later collection
+      # protocol looked absent even though it was loaded and selectable by
+      # typing. Populating server-side keeps the page small and matches across
+      # every loaded record; the caption says so, so the list is never mistaken
+      # for the whole set.
       shiny::showModal(shiny::modalDialog(
         title = "Create a manual Vitek–OpenSpecimen link",
         shiny::selectizeInput(
           ns("manual_vitek_key"), "No-match Vitek record",
-          choices = stats::setNames(vitek_keys, vitek_labels),
-          options = list(placeholder = "Search Vitek Lab ID")
+          choices = NULL,
+          options = list(placeholder = "Type to search Vitek Lab IDs",
+                         maxOptions = .LK_MAX_DROPDOWN_OPTIONS)
         ),
         shiny::selectizeInput(
           ns("manual_os_identifier"), "OpenSpecimen record",
-          choices = stats::setNames(as.character(os_choices$os_identifier), os_labels),
-          options = list(placeholder = "Search identifier, label, CP, or type")
+          choices = NULL,
+          options = list(placeholder = "Type to search identifier, label, protocol, or type",
+                         maxOptions = .LK_MAX_DROPDOWN_OPTIONS)
+        ),
+        shiny::div(
+          class = "lk-modal-note",
+          shiny::tags$strong("Type to search."),
+          sprintf(
+            " The list shows the first %s matches only, so a record you cannot see is still selectable by typing part of its label.",
+            .LK_MAX_DROPDOWN_OPTIONS
+          ),
+          shiny::tags$br(),
+          manual_link_os_summary(specimens)
         ),
         shiny::textInput(
           ns("manual_link_reason"), "Reason",
@@ -492,6 +572,15 @@ linkingServer <- function(id, app_state) {
         ),
         easyClose = TRUE
       ))
+
+      shiny::updateSelectizeInput(
+        session, "manual_vitek_key",
+        choices = vitek_choices, server = TRUE
+      )
+      shiny::updateSelectizeInput(
+        session, "manual_os_identifier",
+        choices = os_options, server = TRUE
+      )
     })
 
     shiny::observeEvent(input$save_manual_link, {
