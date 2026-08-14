@@ -669,12 +669,16 @@ linkingServer <- function(id, app_state) {
 
     # ── Phase C: the one action that rebuilds and writes cleaned outputs ──────
     shiny::observeEvent(input$rebuild_export, {
+      # The click handler in app.R raises the busy overlay as soon as this
+      # button is pressed, so every exit from here must take it back down.
       if (is.null(app_state$db_conn)) {
+        session$sendCustomMessage("axis_busy_hide", list())
         shiny::showNotification("The AXIS database is not open.", type = "error")
         return()
       }
       if (is.null(app_state$vitek_unique) || nrow(app_state$vitek_unique) == 0L ||
           is.null(app_state$specimens) || nrow(app_state$specimens) == 0L) {
+        session$sendCustomMessage("axis_busy_hide", list())
         shiny::showNotification(
           "Parsed Vitek and OpenSpecimen data are not loaded. Run ingestion first.",
           type = "warning"

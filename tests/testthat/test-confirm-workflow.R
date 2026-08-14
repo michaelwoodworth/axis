@@ -139,8 +139,7 @@ test_that("source tables are persisted once per batch and retries do not duplica
   expect_equal(unname(second), c(0L, 0L, 0L))
   expect_equal(.source_counts(db$conn), after_first)
 
-  # A forced re-persist (more files loaded, or a partial failure) replaces this
-  # batch's rows rather than appending a second copy.
+  # Forcing a rewrite replaces this batch's rows rather than appending a copy.
   persist_source_batch(db$conn, "B-1", fx$vitek_raw, fx$vitek_ast, fx$specimens,
                        force = TRUE)
   expect_equal(.source_counts(db$conn), after_first)
@@ -148,6 +147,51 @@ test_that("source tables are persisted once per batch and retries do not duplica
   # A different batch adds its own rows.
   persist_source_batch(db$conn, "B-2", fx$vitek_raw, fx$vitek_ast, fx$specimens)
   expect_equal(.count_rows(db$conn, "vitek_raw"), 2L * nrow(fx$vitek_raw))
+})
+
+test_that("a re-parsed batch replaces its rows without needing force", {
+  fx <- .fixture()
+  db <- .tmp_db()
+  persist_source_batch(db$conn, "B-1", fx$vitek_raw, fx$vitek_ast, fx$specimens)
+
+  # The analyst loads another file, so the batch parses to more rows.
+  bigger <- .fixture(n_isolates = 9L)
+  persist_source_batch(db$conn, "B-1", bigger$vitek_raw, bigger$vitek_ast,
+                       bigger$specimens)
+
+  expect_equal(.count_rows(db$conn, "vitek_raw"), nrow(bigger$vitek_raw))
+  expect_equal(.count_rows(db$conn, "vitek_ast"), nrow(bigger$vitek_ast))
+  expect_equal(.count_rows(db$conn, "specimens"), nrow(bigger$specimens))
+})
+
+test_that("a corrected re-parse with the same row count still replaces the batch", {
+  fx <- .fixture()
+  db <- .tmp_db()
+  persist_source_batch(db$conn, "B-1", fx$vitek_raw, fx$vitek_ast, fx$specimens)
+
+  # Same shape, different content: the kind of change a row-count check misses.
+  edited <- fx
+  edited$vitek_raw$organism_name <- "Escherichia coli"
+  edited$specimens$custom_organism <- "Escherichia coli"
+  persist_source_batch(db$conn, "B-1", edited$vitek_raw, edited$vitek_ast,
+                       edited$specimens)
+
+  stored <- read_table(db$conn, "vitek_raw")
+  expect_equal(nrow(stored), nrow(fx$vitek_raw))
+  expect_true(all(stored$organism_name == "Escherichia coli"))
+  expect_equal(.count_rows(db$conn, "specimens"), nrow(fx$specimens))
+})
+
+test_that("a ledger entry whose rows were removed forces a rewrite", {
+  fx <- .fixture()
+  db <- .tmp_db()
+  persist_source_batch(db$conn, "B-1", fx$vitek_raw, fx$vitek_ast, fx$specimens)
+
+  DBI::dbExecute(db$conn, "DELETE FROM vitek_raw WHERE batch_id = 'B-1'")
+  expect_equal(.count_rows(db$conn, "vitek_raw"), 0L)
+
+  persist_source_batch(db$conn, "B-1", fx$vitek_raw, fx$vitek_ast, fx$specimens)
+  expect_equal(.count_rows(db$conn, "vitek_raw"), nrow(fx$vitek_raw))
 })
 
 test_that("a partially persisted batch can be retried without duplicating rows", {

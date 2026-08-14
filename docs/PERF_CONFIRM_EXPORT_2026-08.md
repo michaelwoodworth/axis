@@ -139,3 +139,23 @@ These runs were made on a Linux container with 2 cores, R 4.3.3, and duckdb
 1.5.5. Absolute seconds on an analyst laptop will differ; the ratios and the
 source-row counts will not. Re-running `inst/bench/bench_confirm.R` on the
 review machine before and after merge is worth the twenty minutes it costs.
+
+## Update after the head-to-head with PR #14
+
+Re-measured on the same machine and fixture after adopting a transaction around
+the link and its audit event, and after replacing the ledger's skip-if-recorded
+rule with a content fingerprint:
+
+| Measure | Before | After |
+|---|---|---|
+| Single confirmation, median | 234.4 s | 0.081 s |
+| Single confirmation, max | 242.9 s | 0.124 s |
+| Source rows added by 5 confirmations | 536,645 | 0 |
+| Phase A, once per batch | 104.7 s | 71.3 s |
+| Full rebuild + export | 126.2 s | 49.5 s |
+
+Phase A fell because a re-run of automerge over unchanged data now costs a
+fingerprint instead of a full rewrite.
+
+See `docs/REVIEW_WORKSTREAM_B_COMPARISON_2026-08.md` for the comparison against
+PR #14, including the two defects that review found in this branch.

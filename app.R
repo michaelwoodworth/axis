@@ -150,8 +150,11 @@ ui <- bslib::page_navbar(
       document.addEventListener('click', function(ev) {
         var btn = ev.target && ev.target.closest ? ev.target.closest('button') : null;
         if (!btn) return;
-        if (btn.id === 'ingestion-commit_matched' || btn.id === 'linking-commit_matched') {
-          axisBusyOverlay('Committing matched rows, rebuilding cleaned tables, and refreshing inventory panels.');
+        // Only the explicit rebuild/export action does long work now. Commit
+        // buttons save a link and return, so covering the screen for them
+        // would leave the overlay up with nothing to hide it.
+        if (btn.id === 'linking-rebuild_export') {
+          axisBusyOverlay('Rebuilding cleaned tables and writing CSV, XLSX, and DuckDB outputs.');
         }
       }, true);
     ")),

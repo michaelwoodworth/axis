@@ -648,8 +648,9 @@ ingestionServer <- function(id, app_state) {
 
         # Phase A: the parsed source tables belong to this ingestion batch, so
         # they are persisted once here — not again on every later confirmation.
-        # force = TRUE replaces this batch's rows, which keeps a re-run after
-        # loading more files (or after a partial failure) free of duplicates.
+        # A re-run after loading more files rewrites the batch because its
+        # content fingerprint changed; a re-run over identical data costs
+        # nothing and writes nothing.
         if (!is.null(rv$db_conn)) {
           tryCatch(
             persist_source_batch(
@@ -657,8 +658,7 @@ ingestionServer <- function(id, app_state) {
               batch_id  = rv$batch_id,
               vitek_raw = rv$vitek_raw,
               vitek_ast = rv$vitek_ast,
-              specimens = rv$specimens,
-              force     = TRUE
+              specimens = rv$specimens
             ),
             error = function(e) {
               showNotification(

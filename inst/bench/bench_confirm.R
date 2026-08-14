@@ -205,10 +205,41 @@ CACHE <- Sys.getenv("AXIS_BENCH_CACHE",
   }, integer(1))
 }
 
-.has_split_api <- function() {
-  all(vapply(c("persist_source_batch", "confirm_links", "rebuild_cleaned",
-               "write_cleaned_outputs"),
-             exists, logical(1), mode = "function"))
+# Which persistence API does the checked-out branch provide? The benchmark is
+# run against more than one implementation of this handoff, so it binds by
+# capability rather than assuming one set of names.
+.api_flavour <- function() {
+  if (exists("confirm_links", mode = "function")) return("claude")
+  if (exists("record_confirmed_links", mode = "function")) return("codex")
+  "pre-change"
+}
+
+.api_persist <- function(conn, batch_id, vr, va, sp) {
+  switch(.api_flavour(),
+    claude = persist_source_batch(conn, batch_id, vr, va, sp),
+    codex  = persist_source_batch_once(conn, batch_id, vr, va, sp),
+    write_ingested_tables(conn, batch_id = batch_id, vitek_raw = vr,
+                          vitek_ast = va, specimens = sp))
+}
+
+.api_confirm <- function(conn, rows, batch_id) {
+  switch(.api_flavour(),
+    claude = confirm_links(conn, rows, batch_id, match_method = "manual_selected",
+                           created_by = "bench", rationale = "benchmark"),
+    codex  = record_confirmed_links(conn, rows, batch_id, "manual_selected",
+                                    "bench", "benchmark"),
+    stop("No split confirmation API present."))
+}
+
+.api_export <- function(conn, batch_id, vu, va, sp, output_dir, formats) {
+  switch(.api_flavour(),
+    claude = rebuild_and_export_cleaned(conn, batch_id = batch_id,
+               vitek_unique = vu, vitek_ast = va, specimens = sp,
+               output_dir = output_dir, formats = formats),
+    codex  = rebuild_and_export_cleaned_data(conn, batch_id = batch_id,
+               vitek_unique = vu, vitek_ast = va, specimens = sp,
+               output_dir = output_dir, formats = formats),
+    stop("No split export API present."))
 }
 
 .candidate_rows <- function(fx, n) {
@@ -234,7 +265,7 @@ bench_run <- function(fx = .load_fixture(), n = N_CONFIRMATIONS) {
   on.exit(close_db(db$conn), add = TRUE)
   conn <- db$conn
 
-  split_api <- .has_split_api()
+  split_api <- .api_flavour() != "pre-change"
   rows <- .candidate_rows(fx, n)
 
   message("\n== Dataset (row counts only) ==")
@@ -248,22 +279,11 @@ bench_run <- function(fx = .load_fixture(), n = N_CONFIRMATIONS) {
     no_match     = if (is.null(fx$buckets$none)) 0L else nrow(fx$buckets$none)
   )
   print(counts)
-  message("API: ", if (split_api) "split (confirm / rebuild / export)" else "pre-change (commit_matched_links)")
+  message("API: ", .api_flavour())
 
   # ── Phase A: persist the ingestion batch's source tables once ──────────────
-  if (split_api) {
-    t_sources <- .time_only(persist_source_batch(
-      conn, batch_id = batch_id,
-      vitek_raw = fx$vitek_raw, vitek_ast = fx$vitek_ast,
-      specimens = fx$specimens
-    ))
-  } else {
-    t_sources <- .time_only(write_ingested_tables(
-      conn, batch_id = batch_id,
-      vitek_raw = fx$vitek_raw, vitek_ast = fx$vitek_ast,
-      specimens = fx$specimens
-    ))
-  }
+  t_sources <- .time_only(.api_persist(
+    conn, batch_id, fx$vitek_raw, fx$vitek_ast, fx$specimens))
   src_after_load <- .source_row_counts(conn)
 
   # ── Phase B: single confirmations ─────────────────────────────────────────
@@ -271,11 +291,7 @@ bench_run <- function(fx = .load_fixture(), n = N_CONFIRMATIONS) {
   for (i in seq_len(n)) {
     row_i <- rows[i, , drop = FALSE]
     if (split_api) {
-      per_confirmation[i] <- .time_only(confirm_links(
-        conn, matched = row_i, batch_id = batch_id,
-        match_method = "manual_selected", created_by = "bench",
-        rationale = "benchmark"
-      ))
+      per_confirmation[i] <- .time_only(.api_confirm(conn, row_i, batch_id))
     } else {
       per_confirmation[i] <- .time_only(commit_matched_links(
         conn, matched = row_i, batch_id = batch_id,
@@ -333,10 +349,9 @@ bench_run <- function(fx = .load_fixture(), n = N_CONFIRMATIONS) {
 
   # The whole Phase C action, measured as the application actually runs it.
   if (split_api) {
-    t_full_export <- .time_only(rebuild_and_export_cleaned(
-      conn, batch_id = batch_id, vitek_unique = fx$vitek_unique,
-      vitek_ast = fx$vitek_ast, specimens = fx$specimens,
-      output_dir = out_dir, formats = c("csv", "xlsx", "duckdb")))
+    t_full_export <- .time_only(.api_export(
+      conn, batch_id, fx$vitek_unique, fx$vitek_ast, fx$specimens,
+      out_dir, c("csv", "xlsx", "duckdb")))
   } else {
     t_full_export <- .time_only({
       lc <- read_table(conn, "links_confirmed")
@@ -392,7 +407,7 @@ bench_run <- function(fx = .load_fixture(), n = N_CONFIRMATIONS) {
           confirmed_links = nrow(links_confirmed)))
 
   results <- list(
-    api = if (split_api) "split" else "pre-change",
+    api = .api_flavour(),
     counts = counts,
     per_confirmation = per_confirmation,
     timings = timings,

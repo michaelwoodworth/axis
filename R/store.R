@@ -65,12 +65,20 @@ init_db_schema <- function(conn) {
   # confirmations must never append source rows again.
   DBI::dbExecute(conn, "
     CREATE TABLE IF NOT EXISTS source_batches (
-      batch_id   VARCHAR,
-      table_name VARCHAR,
-      n_rows     INTEGER,
-      written_at TIMESTAMP
+      batch_id     VARCHAR,
+      table_name   VARCHAR,
+      n_rows       INTEGER,
+      content_hash VARCHAR,
+      written_at   TIMESTAMP
     )
   ")
+  .ensure_db_columns(conn, "source_batches", c(
+    batch_id     = "VARCHAR",
+    table_name   = "VARCHAR",
+    n_rows       = "INTEGER",
+    content_hash = "VARCHAR",
+    written_at   = "TIMESTAMP"
+  ))
 
   DBI::dbExecute(conn, "
     CREATE TABLE IF NOT EXISTS cleaned_overrides (
@@ -459,18 +467,24 @@ build_links_from_matches <- function(matched_tbl, batch_id, created_by = "analys
 #' ingestion batch, not to any individual linking decision, so they are written
 #' once when the batch is prepared and never again while the analyst reviews.
 #'
-#' The write is idempotent per (batch_id, table): a table already recorded in
-#' `source_batches` for this batch is skipped. Re-persisting a batch (for
-#' example after loading more files, or retrying a partial failure) replaces
-#' that batch's rows rather than appending a second copy, so a retry can never
-#' duplicate rows already written.
+#' A table is written only when what is in the database does not already match
+#' what is in memory. The ledger in `source_batches` records the row count and a
+#' content fingerprint per (batch_id, table); a write is skipped only when the
+#' fingerprint, the recorded row count, and the row count actually present in
+#' the table all agree. Anything else — a first load, a re-parse after loading
+#' more files, a corrected export that happens to have the same number of rows,
+#' or a batch left half-written by an interrupted attempt — replaces that
+#' batch's rows rather than appending a second copy.
+#'
+#' Correctness therefore does not depend on the caller knowing whether the
+#' parsed content changed.
 #'
 #' @param conn      DBI connection from open_db().
 #' @param batch_id  Character. Current batch identifier.
 #' @param vitek_raw,vitek_ast,specimens Parsed source tibbles (may be NULL).
-#' @param force     Logical. TRUE re-writes tables already recorded for this
-#'                  batch (replacing their rows). Used when the parsed content
-#'                  of the batch has changed.
+#' @param force     Logical. TRUE re-writes even when the fingerprint matches.
+#'                  Not needed for correctness; an escape hatch for callers that
+#'                  want to rewrite unconditionally.
 #' @return Named integer vector of rows persisted per table (0 where skipped).
 persist_source_batch <- function(conn, batch_id,
                                  vitek_raw = NULL,
@@ -486,49 +500,91 @@ persist_source_batch <- function(conn, batch_id,
   inputs <- list(vitek_raw = vitek_raw, vitek_ast = vitek_ast,
                  specimens = specimens)
   written <- c(vitek_raw = 0L, vitek_ast = 0L, specimens = 0L)
-  already <- .persisted_source_tables(conn, batch_id)
+  ledger <- .source_batch_ledger(conn, batch_id)
 
   for (nm in names(inputs)) {
     tbl <- inputs[[nm]]
     if (is.null(tbl) || nrow(tbl) == 0) next
-    if (nm %in% already && !isTRUE(force)) next
+
+    # Fingerprint the parsed table before staging it. Staging specimens means
+    # serialising the OpenSpecimen blob columns, which is the expensive part of
+    # this function; there is no reason to pay it just to discover a no-op.
+    fingerprint <- .source_fingerprint(tbl)
+    if (!isTRUE(force) &&
+        .source_batch_is_current(conn, ledger, nm, fingerprint, nrow(tbl), batch_id)) {
+      next
+    }
 
     staged <- .with_batch(tbl, batch_id)
     if (identical(nm, "specimens")) staged <- .stringify_list_cols(staged)
 
-    # Replace rather than append: makes a retry after a partial failure safe.
-    .replace_batch_rows(conn, nm, staged, batch_id)
-    .record_source_batch(conn, batch_id, nm, nrow(staged))
+    # Replace rather than append, in one transaction with its ledger entry, so
+    # an interrupted attempt leaves neither half-written rows nor a ledger
+    # entry claiming rows that are not there.
+    DBI::dbWithTransaction(conn, {
+      .replace_batch_rows(conn, nm, staged, batch_id)
+      .record_source_batch(conn, batch_id, nm, nrow(staged), fingerprint)
+    })
     written[[nm]] <- nrow(staged)
   }
 
   written
 }
 
-#' Which source tables have already been persisted for this batch?
-.persisted_source_tables <- function(conn, batch_id) {
-  if (!"source_batches" %in% DBI::dbListTables(conn)) return(character())
+#' Content fingerprint for a parsed source table.
+.source_fingerprint <- function(tbl) {
+  tryCatch(rlang::hash(tibble::as_tibble(tbl)), error = function(e) NA_character_)
+}
+
+#' Ledger rows recorded for this batch, keyed by table name.
+.source_batch_ledger <- function(conn, batch_id) {
+  if (!"source_batches" %in% DBI::dbListTables(conn)) return(tibble::tibble())
   tryCatch(
     DBI::dbGetQuery(
       conn,
-      "SELECT DISTINCT table_name FROM source_batches WHERE batch_id = ?",
+      "SELECT table_name, n_rows, content_hash FROM source_batches WHERE batch_id = ?",
       params = list(as.character(batch_id))
-    )[["table_name"]],
-    error = function(e) character()
+    ),
+    error = function(e) tibble::tibble()
   )
 }
 
-.record_source_batch <- function(conn, batch_id, table_name, n_rows) {
+#' Is this table already persisted for this batch, with this exact content?
+.source_batch_is_current <- function(conn, ledger, table_name, fingerprint,
+                                     n_rows, batch_id) {
+  if (is.na(fingerprint)) return(FALSE)
+  if (is.null(ledger) || nrow(ledger) == 0) return(FALSE)
+  row <- ledger[ledger$table_name == table_name, , drop = FALSE]
+  if (nrow(row) != 1L) return(FALSE)
+  if (!identical(as.character(row$content_hash[[1]]), fingerprint)) return(FALSE)
+  if (!identical(as.integer(row$n_rows[[1]]), as.integer(n_rows))) return(FALSE)
+
+  # Guard against a ledger entry that outlived its rows.
+  actual <- tryCatch(
+    DBI::dbGetQuery(
+      conn,
+      paste0("SELECT COUNT(*) AS n FROM ", DBI::dbQuoteIdentifier(conn, table_name),
+             " WHERE batch_id = ?"),
+      params = list(as.character(batch_id))
+    )$n[[1]],
+    error = function(e) NA_real_
+  )
+  isTRUE(as.numeric(actual) == as.numeric(n_rows))
+}
+
+.record_source_batch <- function(conn, batch_id, table_name, n_rows,
+                                 content_hash = NA_character_) {
   DBI::dbExecute(
     conn,
     "DELETE FROM source_batches WHERE batch_id = ? AND table_name = ?",
     params = list(as.character(batch_id), as.character(table_name))
   )
   .append_table_aligned(conn, "source_batches", tibble::tibble(
-    batch_id   = as.character(batch_id),
-    table_name = as.character(table_name),
-    n_rows     = as.integer(n_rows),
-    written_at = lubridate::now()
+    batch_id     = as.character(batch_id),
+    table_name   = as.character(table_name),
+    n_rows       = as.integer(n_rows),
+    content_hash = as.character(content_hash),
+    written_at   = lubridate::now()
   ))
   invisible(NULL)
 }
@@ -571,28 +627,34 @@ confirm_links <- function(conn, matched, batch_id,
     match_method = match_method,
     state        = state
   )
-  inserted <- insert_new_links(conn, links)
+  # The link and its audit event are one fact about one analyst decision, so
+  # they are written together. Without the transaction an interruption between
+  # the two writes leaves a confirmed link with no record of who confirmed it.
+  inserted <- NULL
   audit <- NULL
+  DBI::dbWithTransaction(conn, {
+    inserted <- insert_new_links(conn, links)
 
-  if (nrow(inserted) > 0L && !identical(match_method, "auto")) {
-    rationale_text <- if (is.null(rationale) || length(rationale) == 0L ||
-                          is.na(rationale[[1]])) "" else trimws(as.character(rationale[[1]]))
-    audit <- inserted |>
-      dplyr::transmute(
-        event_id = purrr::map_chr(seq_len(dplyr::n()), ~ uuid::UUIDgenerate()),
-        link_id = .data$link_id,
-        event_type = "link.manually_confirmed",
-        field = "link",
-        from_value = "unconfirmed",
-        to_value = paste0(
-          .data$os_identifier,
-          if (nzchar(rationale_text)) paste0(" | ", rationale_text) else ""
-        ),
-        who = created_by,
-        when_ts = lubridate::now()
-      )
-    write_overrides(conn, overrides = NULL, edit_log = audit)
-  }
+    if (nrow(inserted) > 0L && !identical(match_method, "auto")) {
+      rationale_text <- if (is.null(rationale) || length(rationale) == 0L ||
+                            is.na(rationale[[1]])) "" else trimws(as.character(rationale[[1]]))
+      audit <- inserted |>
+        dplyr::transmute(
+          event_id = purrr::map_chr(seq_len(dplyr::n()), ~ uuid::UUIDgenerate()),
+          link_id = .data$link_id,
+          event_type = "link.manually_confirmed",
+          field = "link",
+          from_value = "unconfirmed",
+          to_value = paste0(
+            .data$os_identifier,
+            if (nzchar(rationale_text)) paste0(" | ", rationale_text) else ""
+          ),
+          who = created_by,
+          when_ts = lubridate::now()
+        )
+      write_overrides(conn, overrides = NULL, edit_log = audit)
+    }
+  })
 
   list(
     n_committed = nrow(inserted),
