@@ -152,6 +152,126 @@ test_that("auto_match ignores ARRRRG underscores and REACT case differences", {
                     candidates$label_score == 60L))
 })
 
+test_that("SNT APPS REACT protocol family normalizes known title variants", {
+  known_titles <- c(
+    "SNT", "Sentinel", "Sentinel-REACT", "APPS", "APPS 2", "APPS_2",
+    "APPS _2", "react"
+  )
+
+  expect_equal(
+    .protocol_family(known_titles),
+    rep("SNT_APPS_REACT", length(known_titles))
+  )
+  expect_true(all(.cp_titles_overlap("SNT/APPS/React", known_titles)))
+  expect_false(any(.cp_titles_overlap(
+    "SNT/APPS/React",
+    c("FAIR", "ARRRRG", "Pre-Alert", "MEPSD", "unknown", "APPS pilot")
+  )))
+})
+
+test_that("Sentinel-REACT overlaps the shared SNT APPS REACT family", {
+  expect_equal(.protocol_family("Sentinel-REACT"), "SNT_APPS_REACT")
+  expect_true(.cp_titles_overlap("SNT/APPS/React", "Sentinel-REACT"))
+  expect_true(.cp_titles_overlap("Sentinel / REACT", "APPS _2"))
+})
+
+test_that("SNT Vitek record can match an APPS 2 cryopreserved cell directly", {
+  vitek <- tibble::tibble(
+    lab_id = "SNT001ESBL1",
+    isolate_number = "1",
+    parsed_study = "SNT",
+    parsed_subject = "SNT001",
+    parsed_target = "ESBL",
+    cp_hint = "SNT/APPS/React",
+    testing_date = as.Date("2025-01-10"),
+    organism_name = "Esch.coli"
+  )
+
+  specimens <- tibble::tibble(
+    os_identifier = c("apps-2-correct", "fair-lookalike"),
+    project_id = c("APPS_2", "FAIR"),
+    specimen_label = c("SNT001ESBL1", "SNT001ESBL1"),
+    cp_short_title = c("APPS _2", "FAIR 618"),
+    participant_id = c("SNT001", "SNT001"),
+    custom_collection_date = as.Date(c("2025-01-10", "2025-01-10")),
+    custom_mdro = c("ESBL", "ESBL"),
+    custom_organism = c("Escherichia coli", "Escherichia coli"),
+    type = c("Cryopreserved Cells", "Cryopreserved Cells")
+  )
+
+  candidates <- auto_match(vitek, specimens, thresh_review = 0, parallel = FALSE)
+  buckets <- bucket_results(candidates, vitek)
+
+  expect_equal(candidates$os_identifier, "apps-2-correct")
+  expect_equal(candidates$cp_score, 5L)
+  expect_equal(buckets$matched$os_identifier, "apps-2-correct")
+  expect_equal(nrow(buckets$review), 0)
+})
+
+test_that("shared SNT APPS REACT family is not enough for automatic matching", {
+  vitek <- tibble::tibble(
+    lab_id = "SNT001ESBL1",
+    isolate_number = "1",
+    parsed_study = "SNT",
+    parsed_subject = "SNT001",
+    parsed_target = "ESBL",
+    cp_hint = "SNT/APPS/React",
+    testing_date = as.Date("2025-01-10"),
+    organism_name = "Esch.coli"
+  )
+
+  specimens <- tibble::tibble(
+    os_identifier = "apps-2-wrong-record",
+    project_id = "APPS_2",
+    specimen_label = "SNT999ESBL1",
+    cp_short_title = "APPS 2",
+    participant_id = "SNT999",
+    custom_collection_date = as.Date("2025-02-10"),
+    custom_mdro = "CRE",
+    custom_organism = "Klebsiella pneumoniae",
+    type = "Cryopreserved Cells"
+  )
+
+  candidates <- auto_match(vitek, specimens, parallel = FALSE)
+  buckets <- bucket_results(candidates, vitek)
+
+  expect_equal(nrow(candidates), 0)
+  expect_equal(nrow(buckets$matched), 0)
+  expect_equal(buckets$none$lab_id, "SNT001ESBL1")
+})
+
+test_that("similarly scored SNT APPS candidates remain in needs-review", {
+  vitek <- tibble::tibble(
+    lab_id = "SNT001ESBL1",
+    isolate_number = "1",
+    parsed_study = "SNT",
+    parsed_subject = "SNT001",
+    parsed_target = "ESBL",
+    cp_hint = "SNT/APPS/React",
+    testing_date = as.Date("2025-01-10"),
+    organism_name = "Esch.coli"
+  )
+
+  specimens <- tibble::tibble(
+    os_identifier = c("apps-2-a", "apps-2-b"),
+    project_id = "APPS_2",
+    specimen_label = c("SNT001ESBL1", "SNT001ESBL1"),
+    cp_short_title = c("APPS 2", "APPS_2"),
+    participant_id = "SNT001",
+    custom_collection_date = as.Date(c("2025-01-10", "2025-01-10")),
+    custom_mdro = "ESBL",
+    custom_organism = "Escherichia coli",
+    type = "Cryopreserved Cells"
+  )
+
+  candidates <- auto_match(vitek, specimens, parallel = FALSE)
+  buckets <- bucket_results(candidates, vitek)
+
+  expect_equal(nrow(buckets$matched), 0)
+  expect_equal(sort(buckets$review$os_identifier), c("apps-2-a", "apps-2-b"))
+  expect_equal(nrow(buckets$none), 0)
+})
+
 test_that("auto_match parallel path matches serial scoring", {
   vitek <- tibble::tibble(
     lab_id = c("ARG026P2CRE1", "bEM037PRAE1"),
