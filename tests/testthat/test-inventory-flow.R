@@ -99,3 +99,61 @@ test_that("os_enterococcus_flow_rows tolerates empty and missing input", {
   expect_equal(nrow(os_enterococcus_flow_rows(NULL)), 0L)
   expect_equal(nrow(os_enterococcus_flow_rows(tibble::tibble())), 0L)
 })
+
+# ── Flow table behind the Sankey ─────────────────────────────────────────────
+
+.inv_linked <- function() {
+  tibble::tibble(
+    clean_participant_id = c("rML01", "aEM037"),
+    v_parsed_subject = c("rML01", "aEM037"),
+    lab_id = c("rML01PRaD00C1", "aEM037PRaC1"),
+    v_parsed_study = "REACT",
+    clean_cp_title = "REACT", cp_short_title = "REACT", project_id = "REACT",
+    clean_parent_specimen_type = "Perirectal eSwab",
+    inv_mdro_category = c("CRE", "ESBL"),
+    clean_organism = c("Klebsiella pneumoniae", "Escherichia coli")
+  )
+}
+
+test_that("the flow table combines linked and OpenSpecimen-only rows", {
+  rows <- inventory_flow_rows(.inv_linked(), .inv_specimens(),
+                              input = NULL, include_os_only = TRUE)
+  expect_equal(nrow(rows), 2L + 4L)
+  expect_setequal(
+    names(rows),
+    c("flow_site", "flow_study", "flow_parent", "flow_mdro", "flow_species")
+  )
+  expect_false(any(is.na(rows$flow_site)))
+})
+
+test_that("linked and OpenSpecimen-only rows agree on the site for one participant", {
+  rows <- inventory_flow_rows(.inv_linked(), .inv_specimens(),
+                              input = NULL, include_os_only = TRUE)
+  rml <- canonical_flow_site("RML Specialty Hospital")
+  # rML01 appears on both sides and must land in one site node, not two.
+  expect_true(rml %in% rows$flow_site)
+  expect_equal(sum(rows$flow_site == rml), 1L + 3L)
+})
+
+test_that("the flow table drops to the linked rows when OS-only is off", {
+  rows <- inventory_flow_rows(.inv_linked(), .inv_specimens(),
+                              input = NULL, include_os_only = FALSE)
+  expect_equal(nrow(rows), 2L)
+})
+
+test_that("the edge list covers all four transitions", {
+  rows <- inventory_flow_rows(.inv_linked(), NULL, NULL, FALSE)
+  edges <- inventory_flow_edges(rows)
+
+  expect_true(all(c("source", "target", "value") %in% names(edges)))
+  expect_setequal(
+    unique(sub(":.*$", "", edges$source)),
+    c("site", "study", "parent", "mdro")
+  )
+  expect_equal(sum(edges$value[grepl("^site:", edges$source)]), 2L)
+})
+
+test_that("an empty flow table yields an empty edge list rather than an error", {
+  expect_equal(nrow(inventory_flow_edges(NULL)), 0L)
+  expect_equal(nrow(inventory_flow_edges(tibble::tibble())), 0L)
+})

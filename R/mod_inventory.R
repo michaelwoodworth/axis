@@ -100,9 +100,13 @@ inventoryUI <- function(id) {
     .inv-card-head      { display:flex; align-items:center; justify-content:space-between;
                           gap:12px; flex-wrap:wrap; margin-bottom:12px; }
     .inv-card-head .inv-card-title { margin-bottom:0; }
-    .inv-flow-option    { font-size:12px; color:#374151; }
+    .inv-flow-option    { font-size:12px; color:#374151;
+                          display:flex; align-items:center; gap:14px; }
     .inv-flow-option .form-check { margin:0; }
     .inv-flow-option .form-check-label { white-space:nowrap; }
+    .inv-flow-download  { font-size:12px; font-weight:600; color:#1f3a5f;
+                          white-space:nowrap; text-decoration:none; }
+    .inv-flow-download:hover { text-decoration:underline; color:#162d4a; }
     .inv-footnote       { font-size:11px; color:#6b7280; line-height:1.35;
                           margin-top:10px; max-width:920px; }
     .inv-empty          { display:flex; align-items:center; justify-content:center;
@@ -201,6 +205,11 @@ inventoryUI <- function(id) {
               ns("include_os_enterococcus"),
               "Include OS-only Enterococcus",
               value = FALSE
+            ),
+            shiny::downloadLink(
+              ns("download_sankey_data"),
+              "Download flow data (CSV)",
+              class = "inv-flow-download"
             )
           )
         ),
@@ -514,47 +523,38 @@ inventoryServer <- function(id, app_state) {
     })
 
     # ── Sankey: site → study → parent specimen → MDRO → species ─────────────
-    output$chart_sankey <- echarts4r::renderEcharts4r({
-      d <- filtered()
-      include_os_only <- isTRUE(input$include_os_enterococcus)
-      # Not conditional on nrow(d): OpenSpecimen-only rows are exactly what an
-      # analyst wants to see when nothing is linked yet.
-      os_only_flow <- if (include_os_only) {
-        os_enterococcus_flow_rows(inventory_specimens(), input)
-      } else {
-        flow_empty()
-      }
+    # One reactive feeds both the chart and its download, so the CSV can never
+    # describe a different set of isolates than the figure.
+    sankey_flow_rows <- shiny::reactive({
+      inventory_flow_rows(
+        linked = filtered(),
+        specimens = inventory_specimens(),
+        input = input,
+        include_os_only = isTRUE(input$include_os_enterococcus)
+      )
+    })
 
-      if (nrow(d) == 0 && nrow(os_only_flow) == 0) {
+    output$download_sankey_data <- shiny::downloadHandler(
+      filename = function() {
+        site <- input$f_site %||% "All"
+        slug <- gsub("[^A-Za-z0-9]+", "_", paste(site, input$f_study %||% "All"))
+        sprintf("AXIS_specimen_flow_%s_%s.csv", slug, format(Sys.Date(), "%Y%m%d"))
+      },
+      content = function(file) {
+        rows <- sankey_flow_rows()
+        readr::write_csv(rows, file, na = "")
+      }
+    )
+
+    output$chart_sankey <- echarts4r::renderEcharts4r({
+      d_flow <- sankey_flow_rows()
+
+      if (nrow(d_flow) == 0) {
         return(echarts4r::e_charts() |>
           echarts4r::e_title(subtext = "No data"))
       }
 
-      linked_flow <- if (nrow(d) > 0) {
-        add_inventory_flow_fields(d)
-      } else {
-        tibble::tibble()
-      }
-
-      d_flow <- dplyr::bind_rows(linked_flow, os_only_flow) |>
-        normalize_flow_columns() |>
-        dplyr::filter(!is.na(flow_site), !is.na(flow_study))
-
-      edges <- dplyr::bind_rows(
-        d_flow |>
-          dplyr::transmute(source = paste0("site:", flow_site),
-                           target = paste0("study:", flow_study)),
-        d_flow |>
-          dplyr::transmute(source = paste0("study:", flow_study),
-                           target = paste0("parent:", flow_parent)),
-        d_flow |>
-          dplyr::transmute(source = paste0("parent:", flow_parent),
-                           target = paste0("mdro:", flow_mdro)),
-        d_flow |>
-          dplyr::transmute(source = paste0("mdro:", flow_mdro),
-                           target = paste0("species:", flow_species))
-      ) |>
-        dplyr::count(source, target, name = "value")
+      edges <- inventory_flow_edges(d_flow)
 
       if (nrow(edges) == 0) {
         return(echarts4r::e_charts() |>
@@ -568,7 +568,7 @@ inventoryServer <- function(id, app_state) {
         "  var name = params.name || '';",
         "  var label = name.replace(/^(site:|study:|parent:|mdro:|species:)/, '');",
         "  if (params.value !== undefined && params.value !== null) {",
-        "    return label + '\\n' + params.value;",
+        "    return label + ' (' + params.value + ')';",
         "  }",
         "  return label;",
         "}"
@@ -901,6 +901,62 @@ flow_empty <- function() {
 #' from, and any site filter silently drops one of them.
 #'
 #' @return Character vector of site labels, NA where no site code is derivable.
+#' Assemble the Sankey's flow rows: one row per isolate, five flow columns.
+#'
+#' Extracted so the chart and the CSV download are built from the same rows.
+#' A figure and the table behind it disagreeing is worse than having no table.
+#'
+#' @param linked Filtered cleaned-link rows (the output of filtered()).
+#' @param specimens Loaded OpenSpecimen records, for the OS-only Enterococcus rows.
+#' @param input Shiny input list carrying the filter selections, or NULL.
+#' @param include_os_only Logical. Add OpenSpecimen-only Enterococcus rows.
+#' @return tibble with flow_site, flow_study, flow_parent, flow_mdro, flow_species.
+inventory_flow_rows <- function(linked, specimens = NULL, input = NULL,
+                                include_os_only = FALSE) {
+  linked_flow <- if (!is.null(linked) && nrow(linked) > 0) {
+    add_inventory_flow_fields(linked)
+  } else {
+    tibble::tibble()
+  }
+
+  os_only_flow <- if (isTRUE(include_os_only)) {
+    os_enterococcus_flow_rows(specimens, input)
+  } else {
+    flow_empty()
+  }
+
+  dplyr::bind_rows(linked_flow, os_only_flow) |>
+    normalize_flow_columns() |>
+    dplyr::filter(!is.na(flow_site), !is.na(flow_study)) |>
+    dplyr::select(flow_site, flow_study, flow_parent, flow_mdro, flow_species)
+}
+
+#' Collapse flow rows to the Sankey's edge list.
+#'
+#' @param flow_rows Output of inventory_flow_rows().
+#' @return tibble of source, target, value across the four transitions.
+inventory_flow_edges <- function(flow_rows) {
+  if (is.null(flow_rows) || nrow(flow_rows) == 0) {
+    return(tibble::tibble(source = character(), target = character(),
+                          value = integer()))
+  }
+  dplyr::bind_rows(
+    flow_rows |>
+      dplyr::transmute(source = paste0("site:", flow_site),
+                       target = paste0("study:", flow_study)),
+    flow_rows |>
+      dplyr::transmute(source = paste0("study:", flow_study),
+                       target = paste0("parent:", flow_parent)),
+    flow_rows |>
+      dplyr::transmute(source = paste0("parent:", flow_parent),
+                       target = paste0("mdro:", flow_mdro)),
+    flow_rows |>
+      dplyr::transmute(source = paste0("mdro:", flow_mdro),
+                       target = paste0("species:", flow_species))
+  ) |>
+    dplyr::count(source, target, name = "value")
+}
+
 os_specimen_site_label <- function(participant_id, specimen_label = NULL,
                                    cp_short_title = NULL) {
   n <- length(participant_id)
