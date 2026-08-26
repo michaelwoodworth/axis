@@ -144,9 +144,14 @@ auto_match <- function(vitek_unique, specimens,
   specimens <- .ensure_col(specimens, "custom_organism",        NA_character_)
   specimens <- .ensure_col(specimens, "type",                   NA_character_)
   specimens <- .ensure_col(specimens, "class",                  NA_character_)
+  specimens <- .ensure_col(specimens, "lineage",                NA_character_)
   specimens <- .prepare_match_specimens(specimens)
   if (isTRUE(exclude_aliquots)) {
-    specimens <- dplyr::filter(specimens, !.data$.axis_is_review_aliquot)
+    specimens <- dplyr::filter(
+      specimens,
+      !.data$.axis_is_review_aliquot,
+      !.data$.axis_is_duplicate_aliquot
+    )
   }
   if (nrow(specimens) == 0) return(match_candidates_empty())
 
@@ -210,6 +215,10 @@ bucket_results <- function(match_candidates, vitek_unique,
 
   ambiguity_margin <- max(0, as.numeric(ambiguity_margin[[1]]))
 
+  if (!"label_match_kind" %in% names(match_candidates)) {
+    match_candidates$label_match_kind <- NA_character_
+  }
+
   # Best score per (lab_id, isolate_number) pair. A close runner-up is kept in
   # needs-review so row order can never silently decide an uncertain match.
   best <- match_candidates |>
@@ -234,17 +243,24 @@ bucket_results <- function(match_candidates, vitek_unique,
     dplyr::mutate(
       has_disagreement = dplyr::coalesce(mdro_disagree, FALSE) |
         dplyr::coalesce(organism_disagree, FALSE),
-      has_ambiguity = dplyr::coalesce(.data$has_ambiguity, FALSE)
+      has_ambiguity = dplyr::coalesce(.data$has_ambiguity, FALSE),
+      # A label that matches only as an ordered subsequence is a suggestion,
+      # not an identification. Such a link always goes to needs-review for an
+      # analyst to confirm, however high the other signals push the score.
+      has_weak_label = dplyr::coalesce(
+        .data$label_match_kind == "subsequence", FALSE
+      )
     )
 
   matched_keys <- disagreement |>
-    dplyr::filter(score >= thresh_auto, !has_disagreement, !has_ambiguity) |>
+    dplyr::filter(score >= thresh_auto, !has_disagreement, !has_ambiguity,
+                  !has_weak_label) |>
     dplyr::select(lab_id, isolate_number)
 
   review_keys <- disagreement |>
     dplyr::filter(
       score >= thresh_review,
-      score < thresh_auto | has_disagreement | has_ambiguity
+      score < thresh_auto | has_disagreement | has_ambiguity | has_weak_label
     ) |>
     dplyr::select(lab_id, isolate_number)
 
@@ -349,6 +365,7 @@ match_candidates_empty <- function() {
     specimen_label = character(),
     cp_short_title = character(),
     score          = integer(),
+    label_match_kind = character(),
     label_score    = integer(),
     subject_score  = integer(),
     mdro_score     = integer(),
@@ -381,9 +398,40 @@ match_candidates_empty <- function() {
       .axis_type_trim = trimws(as.character(.data$type)),
       .axis_class_trim = trimws(as.character(.data$class)),
       .axis_cp_title_trim = trimws(as.character(.data$cp_short_title)),
+      .axis_lineage_trim = trimws(as.character(.data$lineage)),
       .axis_is_review_aliquot = grepl("^aliquot$", .data$.axis_type_trim, ignore.case = TRUE) |
         (grepl("^aliquot$", .data$.axis_class_trim, ignore.case = TRUE) &
            .data$.axis_type_trim != "Cryopreserved Cells")
+    ) |>
+    .flag_duplicate_lineage_aliquots()
+}
+
+#' Flag cryopreserved aliquots that duplicate a specimen already in the set.
+#'
+#' A glycerol cryovial is stored as a separate OpenSpecimen record whose
+#' lineage is "Aliquot" but whose class and type are Cell / Cryopreserved
+#' Cells, so the type and class tests above never exclude it. Its display label
+#' also has the glycerol suffix stripped, which makes it normalise to exactly
+#' its parent's label. Both records then score identically and the analyst sees
+#' the same specimen twice in needs-review.
+#'
+#' Only aliquots whose parent is present are flagged. Where the parent is
+#' absent from the export the aliquot is the only record of that isolate, and
+#' dropping it would hide a record the analyst has to be able to reach.
+.flag_duplicate_lineage_aliquots <- function(specimens) {
+  if (!".axis_lineage_trim" %in% names(specimens)) {
+    specimens$.axis_lineage_trim <- NA_character_
+  }
+  is_aliquot_lineage <- grepl("^aliquot$", specimens$.axis_lineage_trim,
+                              ignore.case = TRUE)
+  label <- specimens$.axis_specimen_label_norm
+
+  parent_labels <- unique(label[!is_aliquot_lineage & !is.na(label) & nzchar(label)])
+
+  specimens |>
+    dplyr::mutate(
+      .axis_is_duplicate_aliquot = is_aliquot_lineage &
+        !is.na(label) & nzchar(label) & label %in% parent_labels
     )
 }
 
@@ -412,11 +460,24 @@ match_candidates_empty <- function() {
     grepl(a, b, fixed = TRUE) || grepl(b, a, fixed = TRUE)
   }, lid_match, slabel_match)
 
+  label_subsequence <- mapply(function(a, b) {
+    if (is.na(a) || is.na(b) || nchar(a) < 6 || nchar(b) < 6) return(FALSE)
+    .is_ordered_subsequence(a, b) || .is_ordered_subsequence(b, a)
+  }, lid_match, slabel_match)
+
+  label_match_kind <- dplyr::case_when(
+    is.na(slabel_match) | slabel_match == "" ~ "none",
+    lid_match == slabel_match                ~ "exact",
+    label_substring                          ~ "substring",
+    label_subsequence                        ~ "subsequence",
+    TRUE                                     ~ "none"
+  )
+
   label_score <- dplyr::case_when(
-    is.na(slabel_match) | slabel_match == "" ~  0L,
-    lid_match == slabel_match                ~ 60L,
-    label_substring                          ~ 45L,
-    TRUE                                     ~  0L
+    label_match_kind == "exact"       ~ 60L,
+    label_match_kind == "substring"   ~ 45L,
+    label_match_kind == "subsequence" ~ 30L,
+    TRUE                              ~  0L
   )
 
   # ── Signal 2: Subject match (0–35) ───────────────────────────────────
@@ -509,6 +570,7 @@ match_candidates_empty <- function() {
     os_type           = cands$type,
     os_class          = cands$class,
     score             = score,
+    label_match_kind  = label_match_kind,
     label_score       = label_score,
     subject_score     = subject_score,
     mdro_score        = mdro_score,
@@ -590,9 +652,37 @@ match_candidates_empty <- function() {
   x <- trimws(as.character(x))
   x[x %in% c("", "NA", "N/A", "na", "n/a")] <- NA_character_
   x <- toupper(x)
-  # ARRRRG labels sometimes have a separator after the subject id
-  # (ARG026_P2) while Vitek may omit it (ARG026P2). Removing underscores
-  # keeps display labels intact but makes linkage tolerant to that convention.
-  x <- gsub("_+", "", x)
+  # Accession labels use different separator conventions on each side:
+  # ARRRRG writes ARG026_P2 where Vitek writes ARG026P2, and APPS writes
+  # APPS0028_ig_dp_CRE#3of3 where Vitek writes APPS0028igCRE3of3. Removing
+  # every separator - not just underscores - keeps display labels intact while
+  # making linkage tolerant of all of them. No Vitek identifier in the loaded
+  # data contains punctuation at all.
+  x <- gsub("[^A-Z0-9]+", "", x)
   x
+}
+
+#' Is `a` an ordered subsequence of `b`?
+#'
+#' Accession labels sometimes differ by an inserted token rather than by
+#' punctuation: OpenSpecimen writes APPS0028_ig_dp_CRE#3of3 where Vitek writes
+#' APPS0028igCRE3of3, so neither normalised string contains the other and both
+#' the exact and substring tests fail. Every character of the shorter label
+#' still appears in the longer one, in order.
+#'
+#' This is a weaker signal than a substring match and is scored accordingly.
+#' Matching alone never promotes a link to auto-matched; see bucket_results().
+.is_ordered_subsequence <- function(a, b) {
+  if (is.na(a) || is.na(b)) return(FALSE)
+  if (!nzchar(a) || !nzchar(b)) return(FALSE)
+  if (nchar(a) > nchar(b)) return(FALSE)
+
+  av <- strsplit(a, "", fixed = TRUE)[[1]]
+  bv <- strsplit(b, "", fixed = TRUE)[[1]]
+  i <- 1L
+  for (ch in bv) {
+    if (i > length(av)) break
+    if (identical(ch, av[[i]])) i <- i + 1L
+  }
+  i > length(av)
 }

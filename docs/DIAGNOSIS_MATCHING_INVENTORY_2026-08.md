@@ -228,3 +228,59 @@ before/after on bucket counts.
 All figures come from the shipped functions run over the cached fixture
 described in `docs/AXIS_DEV_ENVIRONMENT.md`. No identifiers appear in this
 document beyond the specimen labels already quoted in the reports.
+
+---
+
+# Fixes applied, and what they measured
+
+All three fixes are in this branch. Measured over the same batch.
+
+## Inventory
+
+| | Before | After |
+|---|---|---|
+| OS-only Enterococcus rows | 772 | 834 |
+| Surviving a `RML Specialty Hospital` filter | **0** | **92** |
+| `Enterococcus spp` rows included | 0 | 9 |
+
+Sites now resolve for every cohort — RML Specialty Hospital, Emory LTAC,
+Emory University Hospital, A.G. Rhodes, Good Shepherd Penn Partners — using the
+same derivation as the linked path, so the two can no longer disagree about
+where a specimen came from. A test asserts that equality directly rather than
+checking each path in isolation.
+
+## Matching
+
+| | Before | After |
+|---|---|---|
+| Candidate rows | 2,213 | 2,135 |
+| Auto-matched isolates | 730 | **751** |
+| Needs-review rows | 805 | 637 |
+| No-match isolates | 985 | **953** |
+| Isolates that left no-match | — | **32** |
+| Isolates that entered no-match | — | **0** |
+| Duplicate glycerol candidates | 93 | **0** |
+| Auto-matched on a subsequence-only label | — | **0** |
+
+Cedar's example, `APPS0028igCRE3of3`:
+
+| | Score | Rank | Label signal |
+|---|---|---|---|
+| Before | 55 | 8th of 1,617 | 0 |
+| After | **85** | **1st** | 30, `subsequence` |
+
+It lands in needs-review, not auto-matched, so she confirms it deliberately.
+
+### The aliquot bug was also suppressing correct matches
+
+21 isolates newly auto-match. All 21 had a duplicated specimen label among
+their candidates, and all 21 had a runner-up within 5 points — the glycerol
+aliquot was tying with its own parent and tripping the ambiguity rule added in
+PR #13. All 21 now match on an **exact** label. So the duplicate records were
+not merely noise in the review queue; they were holding correct links out of
+auto-match, and every one of those had to be confirmed by hand.
+
+Nothing regressed: no isolate moved into no-match, and no subsequence-only
+label reached the auto-matched bucket.
+
+Test suite: 388 passing, 0 failures, 0 warnings, 3 environment-dependent skips.
