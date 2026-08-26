@@ -361,3 +361,129 @@ test_that("match bucket counts use Vitek isolate keys instead of candidate rows"
   expect_equal(counts$review, 2L)
   expect_equal(counts$none, 1L)
 })
+
+# ── Duplicate glycerol aliquots ──────────────────────────────────────────────
+
+.glycerol_specimens <- function(include_parent = TRUE) {
+  parent <- tibble::tibble(
+    os_identifier = "OS-parent", participant_id = "ARG030",
+    specimen_label = "ARG030_P1ESBL1", specimen_label_raw = "ARG030_P1ESBL1",
+    cp_short_title = "ARRRRG 2.0", project_id = "ARRRRG",
+    class = "Cell", type = "Cryopreserved Cells", lineage = "Derived",
+    custom_organism = "Escherichia coli", custom_mdro = "ESBL",
+    custom_collection_date = as.Date("2026-01-01")
+  )
+  aliquot <- parent |>
+    dplyr::mutate(
+      os_identifier = "OS-glycerol",
+      specimen_label_raw = "ARG030_P1ESBL1w/glycerol1",
+      lineage = "Aliquot"
+    )
+  if (include_parent) dplyr::bind_rows(parent, aliquot) else aliquot
+}
+
+test_that("a glycerol aliquot is not offered alongside the specimen it came from", {
+  prepared <- .prepare_match_specimens(.glycerol_specimens())
+
+  expect_equal(sum(prepared$.axis_is_duplicate_aliquot), 1L)
+  expect_true(prepared$.axis_is_duplicate_aliquot[
+    prepared$os_identifier == "OS-glycerol"])
+  expect_false(prepared$.axis_is_duplicate_aliquot[
+    prepared$os_identifier == "OS-parent"])
+
+  # The type and class tests alone never caught these: both records are
+  # Cell / Cryopreserved Cells.
+  expect_false(any(prepared$.axis_is_review_aliquot))
+})
+
+test_that("a glycerol aliquot whose parent is absent is still reachable", {
+  prepared <- .prepare_match_specimens(.glycerol_specimens(include_parent = FALSE))
+  expect_false(any(prepared$.axis_is_duplicate_aliquot))
+})
+
+test_that("auto_match returns one candidate per specimen, not one per aliquot", {
+  vitek <- tibble::tibble(
+    lab_id = "ARG030P1ESBL1", isolate_number = "1",
+    parsed_study = "ARRRRG", parsed_subject = "ARG030", parsed_target = "ESBL",
+    cp_hint = "ARRRRG 2.0", organism_name = "Escherichia coli",
+    testing_date = as.Date("2026-01-01")
+  )
+  cands <- auto_match(vitek, .glycerol_specimens(), parallel = FALSE)
+
+  expect_equal(nrow(cands), 1L)
+  expect_equal(cands$os_identifier, "OS-parent")
+})
+
+# ── Accession label normalisation ────────────────────────────────────────────
+
+test_that("every separator convention normalises to the same accession key", {
+  expect_equal(.norm_accession_label("ARG026_P2"), "ARG026P2")
+  expect_equal(.norm_accession_label("APPS0028_env_ESBL#1of1"), "APPS0028ENVESBL1OF1")
+  expect_equal(.norm_accession_label("SNT0002_d14_env_CRE1of1"), "SNT0002D14ENVCRE1OF1")
+  # The '#' in APPS labels used to survive, which zeroed the label signal for
+  # that entire cohort.
+  expect_false(grepl("#", .norm_accession_label("APPS0028_ig_dp_CRE#3of3")))
+})
+
+test_that("ordered subsequence detects an inserted token", {
+  expect_true(.is_ordered_subsequence("APPS0028IGCRE3OF3", "APPS0028IGDPCRE3OF3"))
+  expect_false(.is_ordered_subsequence("APPS0028IGDPCRE3OF3", "APPS0028IGCRE3OF3"))
+  expect_false(.is_ordered_subsequence("APPS0029IGCRE3OF3", "APPS0028IGDPCRE3OF3"))
+  expect_false(.is_ordered_subsequence("", "ABC"))
+  expect_false(.is_ordered_subsequence(NA_character_, "ABC"))
+})
+
+test_that("an APPS isolate scores its own OpenSpecimen record highest", {
+  vitek <- tibble::tibble(
+    lab_id = "APPS0028igCRE3of3", isolate_number = "1",
+    parsed_study = "APPS", parsed_subject = "APPS0028", parsed_target = "CRE",
+    cp_hint = "SNT/APPS/React", organism_name = "Klebsiella pneumoniae",
+    testing_date = as.Date("2026-01-05")
+  )
+  specimens <- tibble::tibble(
+    os_identifier = c("OS-right", "OS-wrong"),
+    participant_id = "APPS0028",
+    specimen_label = c("APPS0028_ig_dp_CRE#3of3", "APPS0028_pr_dp_ESBL#1of1"),
+    cp_short_title = "SNT/APPS/React", project_id = "SNT",
+    class = "Cell", type = "Cryopreserved Cells", lineage = "Derived",
+    custom_organism = "Klebsiella pneumoniae",
+    custom_mdro = c("CRE", "ESBL"),
+    custom_collection_date = as.Date("2026-01-05")
+  )
+
+  cands <- auto_match(vitek, specimens, parallel = FALSE) |>
+    dplyr::arrange(dplyr::desc(score))
+
+  expect_equal(cands$os_identifier[[1]], "OS-right")
+  expect_equal(cands$label_match_kind[[1]], "subsequence")
+  expect_gt(cands$score[[1]], cands$score[[2]])
+})
+
+test_that("a subsequence-only label never reaches the auto-matched bucket", {
+  candidates <- tibble::tibble(
+    lab_id = "APPS0028igCRE3of3", isolate_number = "1",
+    os_identifier = "OS-right", project_id = "SNT",
+    specimen_label = "APPS0028_ig_dp_CRE#3of3", cp_short_title = "SNT/APPS/React",
+    score = 100L, label_match_kind = "subsequence",
+    mdro_disagree = FALSE, organism_disagree = FALSE
+  )
+  vitek <- tibble::tibble(lab_id = "APPS0028igCRE3of3", isolate_number = "1")
+
+  buckets <- bucket_results(candidates, vitek)
+
+  expect_equal(nrow(buckets$matched), 0L)
+  expect_equal(nrow(buckets$review), 1L)
+})
+
+test_that("an exact label match at the same score does auto-match", {
+  candidates <- tibble::tibble(
+    lab_id = "ARG030P1ESBL1", isolate_number = "1",
+    os_identifier = "OS-parent", project_id = "ARRRRG",
+    specimen_label = "ARG030_P1ESBL1", cp_short_title = "ARRRRG 2.0",
+    score = 100L, label_match_kind = "exact",
+    mdro_disagree = FALSE, organism_disagree = FALSE
+  )
+  vitek <- tibble::tibble(lab_id = "ARG030P1ESBL1", isolate_number = "1")
+
+  expect_equal(nrow(bucket_results(candidates, vitek)$matched), 1L)
+})

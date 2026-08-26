@@ -517,7 +517,9 @@ inventoryServer <- function(id, app_state) {
     output$chart_sankey <- echarts4r::renderEcharts4r({
       d <- filtered()
       include_os_only <- isTRUE(input$include_os_enterococcus)
-      os_only_flow <- if (nrow(d) > 0 && include_os_only) {
+      # Not conditional on nrow(d): OpenSpecimen-only rows are exactly what an
+      # analyst wants to see when nothing is linked yet.
+      os_only_flow <- if (include_os_only) {
         os_enterococcus_flow_rows(inventory_specimens(), input)
       } else {
         flow_empty()
@@ -891,6 +893,29 @@ flow_empty <- function() {
   )
 }
 
+#' Site label for an OpenSpecimen record, derived as the linked path derives it.
+#'
+#' The linked inventory path resolves a site from the participant identifier via
+#' derive_site_code() and the site dictionary. OpenSpecimen-only rows have to
+#' use the same derivation or the two paths disagree about where a specimen came
+#' from, and any site filter silently drops one of them.
+#'
+#' @return Character vector of site labels, NA where no site code is derivable.
+os_specimen_site_label <- function(participant_id, specimen_label = NULL,
+                                   cp_short_title = NULL) {
+  n <- length(participant_id)
+  if (is.null(specimen_label)) specimen_label <- rep(NA_character_, n)
+  if (is.null(cp_short_title)) cp_short_title <- rep(NA_character_, n)
+
+  codes <- purrr::pmap_chr(
+    list(participant_id, specimen_label, rep(NA_character_, n),
+         rep(NA_character_, n), cp_short_title),
+    derive_site_code
+  )
+  dict <- inventory_site_dictionary()
+  dict$site_label[match(codes, dict$site_code)]
+}
+
 os_enterococcus_flow_rows <- function(specimens, input = NULL) {
   if (is.null(specimens) || nrow(specimens) == 0) {
     return(flow_empty())
@@ -917,10 +942,20 @@ os_enterococcus_flow_rows <- function(specimens, input = NULL) {
     ) |>
     dplyr::filter(
       toupper(trimws(as.character(type))) == "CRYOPRESERVED CELLS",
-      .organism_norm %in% c("ENTEROCOCCUS FAECIUM", "ENTEROCOCCUS FAECALIS")
+      # Match the genus, not two hand-listed species. The export also carries
+      # "Enterococcus spp", and E. gallinarum or E. casseliflavus entered later
+      # would otherwise be dropped without trace.
+      grepl("^ENTEROCOCCUS\\b", .organism_norm)
     ) |>
     dplyr::mutate(
-      flow_site = display_flow_site(NA_character_, project_id, cp_short_title),
+      # Resolve the site the same way the linked path does. Passing NA here
+      # made every OpenSpecimen-only row fall through to the collection
+      # protocol, so a specimen the linked path calls "RML Specialty Hospital"
+      # was called "REACT" and vanished whenever a site filter was applied.
+      flow_site = display_flow_site(
+        os_specimen_site_label(participant_id, specimen_label, cp_short_title),
+        project_id, cp_short_title
+      ),
       flow_study = purrr::pmap_chr(
         list(participant_id, participant_id, specimen_label,
              NA_character_, cp_short_title, cp_short_title, project_id),
@@ -930,10 +965,9 @@ os_enterococcus_flow_rows <- function(specimens, input = NULL) {
         dplyr::na_if(as.character(custom_parent_specimen_type), ""),
         as.character(type)
       )),
-      flow_species = dplyr::case_when(
-        .organism_norm == "ENTEROCOCCUS FAECIUM" ~ "Enterococcus faecium",
-        .organism_norm == "ENTEROCOCCUS FAECALIS" ~ "Enterococcus faecalis",
-        TRUE ~ as.character(custom_organism)
+      flow_species = dplyr::coalesce(
+        dplyr::na_if(trimws(as.character(custom_organism)), ""),
+        "Enterococcus sp."
       ),
       flow_mdro = dplyr::case_when(
         grepl("VRE|POSITIVE|YES|VANCOMYCIN", .mdro_norm) ~ "VRE",
