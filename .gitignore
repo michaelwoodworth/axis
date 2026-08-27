@@ -1,0 +1,30 @@
+# AXIS runtime data. The app writes its DuckDB and its cleaned exports under
+# data/ in the app root. These hold specimen identifiers and analyst source
+# exports and must never reach GitHub.
+data/
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp/
+
+# Cleaned outputs, wherever they are written
+AXIS_clean_*.csv
+AXIS_clean_*.xlsx
+AXIS_specimen_flow_*.csv
+
+# Analyst source exports
+*.xls
+*.xlsx
+!inst/extdata/*.xlsx
+
+# Python bytecode from the inst/scripts helpers
+__pycache__/
+*.py[cod]
+
+# R session state
+.Rhistory
+.RData
+.Rproj.user/
+.Renviron
+
+# macOS
+.DS_Store

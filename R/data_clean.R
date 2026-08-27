@@ -226,17 +226,56 @@ build_cleaned <- function(links, overrides, vitek, specimens) {
     dplyr::arrange(project_id, lab_id, isolate_number)
 }
 
-#' Collapse repeated confirmed-link rows to one current logical link.
+#' Collapse repeated confirmed-link rows to one current link per isolate.
 #'
 #' Repeated "commit matched only" actions can create new link_id values for the
 #' same Vitek isolate/OpenSpecimen pairing. This helper keeps the most recent
 #' row for display/export counts without deleting historical database rows.
+#'
+#' The key is the Vitek isolate, not the isolate/specimen pair. One isolate is
+#' one physical thing and links to one cryovial; a database holding two
+#' confirmed specimens for one isolate — which older AXIS versions allowed after
+#' a mis-clicked manual confirmation — would otherwise export that isolate
+#' twice, under two different specimens, with nothing to mark it. The newer link
+#' wins, which is the analyst's most recent decision. See
+#' superseded_isolate_links() to find rows this discards.
 dedup_confirmed_links <- function(links) {
   if (is.null(links) || nrow(links) == 0) return(links)
 
   required <- c("lab_id", "isolate_number", "os_identifier")
   if (length(setdiff(required, names(links))) > 0) return(links)
 
+  .order_links_newest_first(links) |>
+    dplyr::distinct(.axis_lab_key, .axis_isolate_key, .keep_all = TRUE) |>
+    dplyr::arrange(dplyr::across(dplyr::any_of(c("project_id", "lab_id", "isolate_number")))) |>
+    dplyr::select(-dplyr::starts_with(".axis_"))
+}
+
+#' Confirmed links that dedup_confirmed_links() discards.
+#'
+#' An isolate with more than one confirmed OpenSpecimen record is a data problem
+#' an analyst should see, not one to silently resolve. Returns the older rows —
+#' the ones no longer used by the export — so they can be reported and removed.
+#'
+#' @param links links_confirmed tibble.
+#' @return tibble of superseded rows, empty when every isolate has one link.
+superseded_isolate_links <- function(links) {
+  if (is.null(links) || nrow(links) == 0) return(links)
+
+  required <- c("lab_id", "isolate_number", "os_identifier")
+  if (length(setdiff(required, names(links))) > 0) return(links[0, ])
+
+  ordered <- .order_links_newest_first(links)
+
+  ordered |>
+    dplyr::group_by(.axis_lab_key, .axis_isolate_key) |>
+    dplyr::filter(dplyr::n_distinct(.axis_os_key) > 1L, dplyr::row_number() > 1L) |>
+    dplyr::ungroup() |>
+    dplyr::select(-dplyr::starts_with(".axis_"))
+}
+
+#' Order confirmed links newest-decision-first, with the comparison keys attached.
+.order_links_newest_first <- function(links) {
   created_at <- if ("created_at" %in% names(links)) {
     suppressWarnings(as.POSIXct(links$created_at, tz = "UTC"))
   } else {
@@ -251,13 +290,7 @@ dedup_confirmed_links <- function(links) {
     dplyr::arrange(
       dplyr::desc(.axis_created_at),
       dplyr::desc(.axis_row_order)
-    ) |>
-    dplyr::distinct(
-      .axis_lab_key, .axis_isolate_key, .axis_os_key,
-      .keep_all = TRUE
-    ) |>
-    dplyr::arrange(dplyr::across(dplyr::any_of(c("project_id", "lab_id", "isolate_number")))) |>
-    dplyr::select(-dplyr::starts_with(".axis_"))
+    )
 }
 
 .clean_logical_link_key <- function(df) {

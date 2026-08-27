@@ -180,3 +180,122 @@ test_that("confirming the same manual link twice saves one link and one audit ev
   expect_equal(.rows(conn, "links_confirmed"), 1L)
   expect_equal(.rows(conn, "edit_log"), 1L)
 })
+
+# ── Removing a confirmed link ────────────────────────────────────────────────
+
+test_that("the remove-link action deletes the link and restores the isolate", {
+  fx <- .lk_fixture()
+  conn <- open_db(tempfile(fileext = ".duckdb"))
+  withr::defer(close_db(conn))
+  persist_source_batch(conn, "B-lk", fx$vitek_raw, fx$vitek_ast, fx$specimens)
+  app_state <- .lk_state(fx, conn)
+
+  shiny::testServer(linkingServer, args = list(app_state = app_state), {
+    session$setInputs(commit_matched = 1)
+    expect_equal(nrow(app_state$links_confirmed), 2L)
+
+    doomed <- app_state$links_confirmed[1, ]
+    rv$selected_id <- doomed$link_id
+    session$setInputs(unlink_reason = "wrong OpenSpecimen record",
+                      btn_unlink_confirm = 1)
+
+    expect_equal(nrow(app_state$links_confirmed), 1L)
+    expect_false(doomed$link_id %in% app_state$links_confirmed$link_id)
+    expect_null(rv$selected_id)
+
+    # The isolate has to be actionable again, not just absent.
+    expect_true(doomed$lab_id %in% app_state$match_buckets$none$lab_id)
+
+    # And the export is stale until it is rebuilt.
+    expect_true(app_state$needs_export)
+  })
+
+  expect_equal(.rows(conn, "links_confirmed"), 1L)
+
+  audit <- tibble::as_tibble(read_table(conn, "edit_log")) |>
+    dplyr::filter(event_type == "link.retracted")
+  expect_equal(nrow(audit), 1L)
+  expect_match(audit$to_value[[1]], "wrong OpenSpecimen record")
+})
+
+test_that("removing a link lets the isolate be linked to another specimen", {
+  fx <- .lk_fixture()
+  conn <- open_db(tempfile(fileext = ".duckdb"))
+  withr::defer(close_db(conn))
+  persist_source_batch(conn, "B-lk", fx$vitek_raw, fx$vitek_ast, fx$specimens)
+  app_state <- .lk_state(fx, conn)
+
+  shiny::testServer(linkingServer, args = list(app_state = app_state), {
+    session$setInputs(commit_matched = 1)
+    doomed <- app_state$links_confirmed[1, ]
+
+    # While the link stands, a different specimen for that isolate is refused.
+    rival <- tibble::tibble(
+      lab_id = doomed$lab_id, isolate_number = doomed$isolate_number,
+      os_identifier = "OS-OTHER", project_id = doomed$project_id,
+      specimen_label = doomed$specimen_label,
+      cp_short_title = doomed$cp_short_title, score = 92
+    )
+    blocked <- confirm_links(conn, rival, batch_id = "B-lk",
+                             match_method = "manual_selected")
+    expect_equal(blocked$n_committed, 0L)
+    expect_equal(blocked$n_conflicted, 1L)
+
+    rv$selected_id <- doomed$link_id
+    session$setInputs(btn_unlink_confirm = 1)
+
+    # Once it is removed, the corrected link goes in.
+    fixed <- confirm_links(conn, rival, batch_id = "B-lk",
+                           match_method = "manual_selected")
+    expect_equal(fixed$n_committed, 1L)
+    expect_equal(fixed$n_conflicted, 0L)
+  })
+
+  links <- tibble::as_tibble(read_table(conn, "links_confirmed"))
+  expect_equal(nrow(links), 2L)
+  expect_true("OS-OTHER" %in% links$os_identifier)
+})
+
+test_that("removing an already-removed link changes nothing", {
+  fx <- .lk_fixture()
+  conn <- open_db(tempfile(fileext = ".duckdb"))
+  withr::defer(close_db(conn))
+  persist_source_batch(conn, "B-lk", fx$vitek_raw, fx$vitek_ast, fx$specimens)
+  app_state <- .lk_state(fx, conn)
+
+  shiny::testServer(linkingServer, args = list(app_state = app_state), {
+    session$setInputs(commit_matched = 1)
+    doomed_id <- app_state$links_confirmed$link_id[[1]]
+
+    rv$selected_id <- doomed_id
+    session$setInputs(btn_unlink_confirm = 1)
+    expect_equal(nrow(app_state$links_confirmed), 1L)
+
+    rv$selected_id <- doomed_id
+    session$setInputs(btn_unlink_confirm = 2)
+    expect_equal(nrow(app_state$links_confirmed), 1L)
+  })
+
+  expect_equal(.rows(conn, "links_confirmed"), 1L)
+})
+
+test_that("the discarded field edits path still only clears pending edits", {
+  fx <- .lk_fixture()
+  conn <- open_db(tempfile(fileext = ".duckdb"))
+  withr::defer(close_db(conn))
+  persist_source_batch(conn, "B-lk", fx$vitek_raw, fx$vitek_ast, fx$specimens)
+  app_state <- .lk_state(fx, conn)
+
+  shiny::testServer(linkingServer, args = list(app_state = app_state), {
+    session$setInputs(commit_matched = 1)
+    before <- nrow(app_state$links_confirmed)
+
+    rv$pending_edits <- list(organism = "Escherichia coli")
+    session$setInputs(btn_revert = 1)
+
+    expect_equal(length(rv$pending_edits), 0L)
+    # Discarding edits must never remove a link — that is what the separate
+    # remove-link action is for.
+    expect_equal(nrow(app_state$links_confirmed), before)
+  })
+})

@@ -291,6 +291,11 @@ linkingUI <- function(id) {
                          border:1px solid #d1d5db; background:#fff;
                          color:#374151; font-weight:500; font-size:13px; cursor:pointer; }
     .lk-btn-revert:hover { background:#f9fafb; }
+    .lk-btn-unlink     { flex:1; padding:8px; border-radius:7px;
+                         border:1px solid #e5b4b4; background:#fff;
+                         color:#b42318; font-weight:600; font-size:13px;
+                         cursor:pointer; }
+    .lk-btn-unlink:hover { background:#fef3f2; }
     .lk-audit          { background:#fff; border:1px solid #e8e6e0; border-radius:8px;
                          padding:12px 14px; }
     .lk-audit h6       { margin:0 0 10px; font-size:11px; font-weight:700;
@@ -432,6 +437,41 @@ linkingServer <- function(id, app_state) {
       invisible(NULL)
     }
 
+    # Inverse of drop_committed_from_buckets(). A retracted isolate has to come
+    # back somewhere the analyst can act on it; without a fresh auto-match run
+    # there are no candidates for it, so it returns to the no-match bucket where
+    # "Manual link…" is available.
+    restore_retracted_to_buckets <- function(rows) {
+      if (is.null(rows) || nrow(rows) == 0L) return(invisible(NULL))
+      buckets <- app_state$match_buckets
+      if (is.null(buckets)) return(invisible(NULL))
+
+      vu <- app_state$vitek_unique
+      if (is.null(vu) || nrow(vu) == 0L) return(invisible(NULL))
+
+      keys <- rows |>
+        dplyr::select("lab_id", "isolate_number") |>
+        dplyr::distinct()
+
+      restored <- vu |> dplyr::semi_join(keys, by = c("lab_id", "isolate_number"))
+      if (nrow(restored) == 0L) return(invisible(NULL))
+
+      existing <- buckets$none
+      buckets$none <- if (is.null(existing) || nrow(existing) == 0L) {
+        restored
+      } else {
+        dplyr::bind_rows(
+          existing |> dplyr::anti_join(keys, by = c("lab_id", "isolate_number")),
+          restored
+        )
+      }
+
+      buckets$confirmed <- .drop_confirmed_isolates(buckets$confirmed, keys)
+
+      app_state$match_buckets <- buckets
+      invisible(NULL)
+    }
+
     commit_link_rows <- function(rows, method, rationale = "") {
       if (is.null(rows) || nrow(rows) == 0L) {
         shiny::showNotification("No link candidate was selected.", type = "warning")
@@ -464,6 +504,26 @@ linkingServer <- function(id, app_state) {
         mark_needs_export(result$n_committed)
       }
 
+      n_conflicted <- as.integer(result$n_conflicted %||% 0L)
+
+      # A conflict is an isolate already linked to a *different* specimen. It is
+      # withheld rather than appended, because appending would leave one isolate
+      # linked to two specimens and duplicate it in the cleaned export. Say so
+      # plainly — a silently dropped confirmation looks like a click that missed.
+      if (n_conflicted > 0L) {
+        shiny::showNotification(
+          sprintf(
+            paste0("%d isolate%s already linked to a different OpenSpecimen ",
+                   "record and %s not changed. Open the existing link and use ",
+                   "\"Remove link\" first if it is wrong."),
+            n_conflicted,
+            if (n_conflicted == 1L) " is" else "s are",
+            if (n_conflicted == 1L) "was" else "were"
+          ),
+          type = "warning", duration = 12
+        )
+      }
+
       drop_committed_from_buckets(rows)
       rv$selected_id <- NULL
 
@@ -475,6 +535,8 @@ linkingServer <- function(id, app_state) {
             result$n_committed,
             if (result$n_committed == 1L) "" else "s"
           )
+        } else if (n_conflicted > 0L) {
+          "Nothing new was saved."
         } else {
           "That link was already confirmed. Nothing new was saved."
         },
@@ -1015,6 +1077,100 @@ linkingServer <- function(id, app_state) {
       })
     })
 
+    # ── Remove a confirmed link ───────────────────────────────────────────────
+    shiny::observeEvent(input$btn_unlink, {
+      lid <- rv$selected_id
+      if (is.null(lid) || startsWith(lid, "staged::")) {
+        shiny::showNotification("Select a confirmed link first.", type = "warning")
+        return(invisible(NULL))
+      }
+      lc <- app_state$links_confirmed
+      row <- if (!is.null(lc) && nrow(lc) > 0) lc[lc$link_id == lid, ] else NULL
+      if (is.null(row) || nrow(row) == 0) {
+        shiny::showNotification("That link is no longer in AXIS.", type = "warning")
+        return(invisible(NULL))
+      }
+
+      shiny::showModal(shiny::modalDialog(
+        title = "Remove this link?",
+        shiny::p(
+          "This removes the confirmed link between Vitek isolate ",
+          shiny::tags$strong(sprintf("%s / %s", row$lab_id[[1]], row$isolate_number[[1]])),
+          " and OpenSpecimen record ",
+          shiny::tags$strong(as.character(row$os_identifier[[1]])),
+          "."
+        ),
+        shiny::p(
+          class = "text-muted",
+          "The isolate returns to the review queue and can be linked again. Any",
+          " field edits saved against this link are removed with it. The removal",
+          " is recorded in the audit timeline."
+        ),
+        shiny::textInput(
+          ns("unlink_reason"), "Reason (optional)",
+          placeholder = "e.g. selected the wrong OpenSpecimen record"
+        ),
+        footer = shiny::tagList(
+          shiny::modalButton("Cancel"),
+          shiny::actionButton(ns("btn_unlink_confirm"), "Remove link",
+                              class = "btn-danger")
+        ),
+        easyClose = TRUE
+      ))
+    })
+
+    shiny::observeEvent(input$btn_unlink_confirm, {
+      lid <- rv$selected_id
+      if (is.null(lid)) return(invisible(NULL))
+
+      result <- tryCatch(
+        retract_links(
+          conn      = app_state$db_conn,
+          link_ids  = lid,
+          who       = "analyst",
+          rationale = trimws(as.character(input$unlink_reason %||% ""))
+        ),
+        error = function(e) {
+          shiny::showNotification(paste("Removing the link failed:", e$message),
+                                  type = "error", duration = 10)
+          NULL
+        }
+      )
+      if (is.null(result)) return(invisible(NULL))
+
+      shiny::removeModal()
+
+      if (result$n_retracted > 0L) {
+        conn <- app_state$db_conn
+        if (!is.null(conn)) {
+          reread <- function(table_name, fallback) {
+            # cleaned_links only exists once an export has run, and read_table()
+            # warns on a missing table. Don't ask for one that isn't there.
+            tables <- tryCatch(DBI::dbListTables(conn), error = function(e) character())
+            if (!table_name %in% tables) return(fallback)
+            tryCatch(read_table(conn, table_name), error = function(e) fallback)
+          }
+          app_state$links_confirmed   <- reread("links_confirmed", app_state$links_confirmed)
+          app_state$cleaned_overrides <- reread("cleaned_overrides", app_state$cleaned_overrides)
+          app_state$edit_log          <- reread("edit_log", app_state$edit_log)
+          app_state$cleaned_links     <- reread("cleaned_links", app_state$cleaned_links)
+        }
+        restore_retracted_to_buckets(result$retracted)
+        # The cleaned export still contains the removed link until it is rebuilt.
+        mark_needs_export(result$n_retracted)
+        rv$selected_id <- NULL
+      }
+
+      shiny::showNotification(
+        if (result$n_retracted > 0L) {
+          "Link removed. The isolate is back in the review queue — rebuild and export when the review is done."
+        } else {
+          "That link was already removed."
+        },
+        type = if (result$n_retracted > 0L) "message" else "warning"
+      )
+    })
+
     # ── Revert edits ──────────────────────────────────────────────────────────
     shiny::observeEvent(input$btn_revert, {
       rv$pending_edits <- list()
@@ -1251,7 +1407,10 @@ linkingServer <- function(id, app_state) {
           )
         },
 
-        # Save / Revert buttons (only in edit mode)
+        # Save / Discard buttons (only in edit mode). "Discard edits" is named
+        # for what it does: it clears unsaved field edits in this panel. It has
+        # never removed a confirmed link, and the old "Revert" label read as a
+        # promise that it would.
         if (isTRUE(isolate(input$edit_mode)) && !startsWith(lid, "staged::")) {
           shiny::div(
             class = "lk-action-row",
@@ -1264,8 +1423,25 @@ linkingServer <- function(id, app_state) {
             shiny::tags$button(
               id      = ns("btn_revert"),
               class   = "lk-btn-revert action-button",
+              title   = "Clear unsaved field edits in this panel. Does not remove the link.",
               onclick = sprintf("Shiny.setInputValue('%s', Math.random())", ns("btn_revert")),
-              "Revert"
+              "Discard edits"
+            )
+          )
+        },
+
+        # Remove link. A manual confirmation of the wrong OpenSpecimen record
+        # has to be undoable, and the undo has to be reachable from the link
+        # itself rather than hidden behind edit mode.
+        if (!startsWith(lid, "staged::")) {
+          shiny::div(
+            class = "lk-action-row",
+            shiny::tags$button(
+              id      = ns("btn_unlink"),
+              class   = "lk-btn-unlink action-button",
+              title   = "Remove this confirmed link and return the isolate to the review queue.",
+              onclick = sprintf("Shiny.setInputValue('%s', Math.random())", ns("btn_unlink")),
+              "Remove link…"
             )
           )
         },
@@ -1321,6 +1497,26 @@ linkingServer <- function(id, app_state) {
           read_table(conn, "links_confirmed"),
           error = function(e) tibble::tibble()
         )
+
+        # A database written by an older AXIS can hold two confirmed specimens
+        # for one isolate. The export now keeps only the newer one, but the
+        # analyst should be told rather than left with a quietly changed count.
+        stale <- tryCatch(
+          superseded_isolate_links(app_state$links_confirmed),
+          error = function(e) NULL
+        )
+        if (!is.null(stale) && nrow(stale) > 0L) {
+          shiny::showNotification(
+            sprintf(
+              paste0("%d isolate%s more than one confirmed OpenSpecimen record. ",
+                     "The most recent link is being used; open each one and use ",
+                     "\"Remove link\" to clear the older link."),
+              nrow(stale),
+              if (nrow(stale) == 1L) " has" else "s have"
+            ),
+            type = "warning", duration = NULL
+          )
+        }
       }
       if (is.null(app_state$vitek_raw)) {
         app_state$vitek_raw <- tryCatch(

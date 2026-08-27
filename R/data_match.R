@@ -192,7 +192,13 @@ auto_match <- function(vitek_unique, specimens,
 
 # ── Bucketing ─────────────────────────────────────────────────────────────────
 
-#' Bucket match_candidates into matched / review / none.
+#' Bucket match_candidates into matched / review / none / confirmed.
+#'
+#' An isolate whose link an analyst has already confirmed is settled: it is
+#' removed from all three working buckets and reported in $confirmed. Without
+#' this, re-running auto-match regenerates candidates for confirmed isolates and
+#' puts them back in the review queue, where confirming a second, different
+#' OpenSpecimen record would leave the isolate linked to two specimens.
 #'
 #' @param match_candidates  tibble from auto_match().
 #' @param vitek_unique      All deduplicated Vitek rows.
@@ -200,14 +206,23 @@ auto_match <- function(vitek_unique, specimens,
 #' @param thresh_review     Score ≥ this → needs-review (default 50).
 #' @param ambiguity_margin  A runner-up within this many points of the best
 #'   candidate keeps the isolate in needs-review (default 5).
-#' @return Named list: $matched, $review, $none.
+#' @param links_confirmed   Confirmed links, or NULL. Isolates appearing here are
+#'   withheld from every working bucket.
+#' @return Named list: $matched, $review, $none, $confirmed.
 bucket_results <- function(match_candidates, vitek_unique,
                             thresh_auto = 80, thresh_review = 50,
-                            ambiguity_margin = 5) {
+                            ambiguity_margin = 5,
+                            links_confirmed = NULL) {
+  confirmed_keys <- .confirmed_isolate_keys(links_confirmed)
+
+  vitek_unique <- .drop_confirmed_isolates(vitek_unique, confirmed_keys)
+  match_candidates <- .drop_confirmed_isolates(match_candidates, confirmed_keys)
+
   empty <- list(
     matched = match_candidates_empty(),
     review  = match_candidates_empty(),
-    none    = vitek_unique
+    none    = vitek_unique,
+    confirmed = confirmed_keys
   )
 
   if (is.null(match_candidates) || nrow(match_candidates) == 0)
@@ -271,8 +286,52 @@ bucket_results <- function(match_candidates, vitek_unique,
   list(
     matched = best |> dplyr::semi_join(matched_keys, by = c("lab_id", "isolate_number")),
     review  = match_candidates |> dplyr::semi_join(review_keys, by = c("lab_id", "isolate_number")),
-    none    = none_rows
+    none    = none_rows,
+    confirmed = confirmed_keys
   )
+}
+
+#' Distinct (lab_id, isolate_number) keys that already carry a confirmed link.
+#'
+#' The identifiers are returned as written, so a caller can display them.
+#' Comparison happens on the normalised form, in .isolate_key_cols().
+.confirmed_isolate_keys <- function(links_confirmed) {
+  empty <- tibble::tibble(lab_id = character(), isolate_number = character())
+  if (is.null(links_confirmed) || nrow(links_confirmed) == 0) return(empty)
+  if (length(setdiff(c("lab_id", "isolate_number"), names(links_confirmed))) > 0) {
+    return(empty)
+  }
+
+  links_confirmed |>
+    dplyr::select(lab_id, isolate_number) |>
+    dplyr::filter(!is.na(lab_id), !is.na(isolate_number)) |>
+    .isolate_key_cols() |>
+    dplyr::distinct(.axis_lab_key, .axis_iso_key, .keep_all = TRUE) |>
+    dplyr::select(-dplyr::starts_with(".axis_"))
+}
+
+#' Attach upper-cased, trimmed isolate keys, matching how links are written.
+.isolate_key_cols <- function(df) {
+  df |>
+    dplyr::mutate(
+      .axis_lab_key = toupper(trimws(as.character(.data$lab_id))),
+      .axis_iso_key = toupper(trimws(as.character(.data$isolate_number)))
+    )
+}
+
+#' Remove rows whose isolate key appears in `keys`.
+.drop_confirmed_isolates <- function(df, keys) {
+  if (is.null(df) || nrow(df) == 0) return(df)
+  if (is.null(keys) || nrow(keys) == 0) return(df)
+  if (length(setdiff(c("lab_id", "isolate_number"), names(df))) > 0) return(df)
+
+  df |>
+    .isolate_key_cols() |>
+    dplyr::anti_join(
+      keys |> .isolate_key_cols() |> dplyr::select(.axis_lab_key, .axis_iso_key),
+      by = c(".axis_lab_key", ".axis_iso_key")
+    ) |>
+    dplyr::select(-dplyr::starts_with(".axis_"))
 }
 
 #' Count unique Vitek isolate keys in a match-like table.
@@ -296,13 +355,14 @@ match_isolate_key_count <- function(x) {
 #' Count matched / review / none buckets using consistent isolate-level units.
 match_bucket_counts <- function(buckets) {
   if (is.null(buckets)) {
-    return(list(matched = 0L, review = 0L, none = 0L))
+    return(list(matched = 0L, review = 0L, none = 0L, confirmed = 0L))
   }
 
   list(
     matched = match_isolate_key_count(buckets$matched),
     review  = match_isolate_key_count(buckets$review),
-    none    = match_isolate_key_count(buckets$none)
+    none    = match_isolate_key_count(buckets$none),
+    confirmed = match_isolate_key_count(buckets$confirmed)
   )
 }
 
