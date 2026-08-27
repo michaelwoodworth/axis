@@ -608,6 +608,22 @@ ingestionServer <- function(id, app_state) {
       )
     })
 
+    # Confirmed links, read fresh from the database. app_state$links_confirmed is
+    # populated lazily by the Linking tab, so relying on it alone would mean a
+    # re-run of auto-match before that tab is ever opened silently sees no
+    # confirmations and rebuilds the review queue from scratch.
+    confirmed_links_now <- function() {
+      cached <- app_state$links_confirmed
+      if (!is.null(cached) && nrow(cached) > 0) return(cached)
+      if (is.null(rv$db_conn)) return(NULL)
+      out <- tryCatch(
+        read_table(rv$db_conn, "links_confirmed"),
+        error = function(e) NULL
+      )
+      if (!is.null(out) && nrow(out) > 0) app_state$links_confirmed <- out
+      out
+    }
+
     # ── Auto-match logic ───────────────────────────────────────────────────
     run_match <- function() {
       if (is.null(rv$vitek_unique) || nrow(rv$vitek_unique) == 0L) {
@@ -637,7 +653,13 @@ ingestionServer <- function(id, app_state) {
         cands <- auto_match(rv$vitek_unique, rv$specimens,
                              thresh_auto = 80, thresh_review = 50)
         rv$match_candidates  <- cands
-        rv$buckets           <- bucket_results(cands, rv$vitek_unique)
+        # Isolates an analyst has already confirmed are settled. Passing them
+        # here keeps a re-run of auto-match from regenerating candidates for
+        # them and returning them to the review queue.
+        rv$buckets           <- bucket_results(
+          cands, rv$vitek_unique,
+          links_confirmed = confirmed_links_now()
+        )
 
         sel_proj <- rv$available_projects |>
           dplyr::filter(project_id %in% selected_proj_ids())
@@ -718,6 +740,22 @@ ingestionServer <- function(id, app_state) {
           app_state$pending_confirmations <- as.integer(pending) + result$n_committed
           app_state$needs_export <- TRUE
           app_state$last_export_failed <- FALSE
+        }
+
+        n_conflicted <- as.integer(result$n_conflicted %||% 0L)
+        if (n_conflicted > 0L) {
+          showNotification(
+            sprintf(
+              paste0("%d auto-matched isolate%s already linked to a different ",
+                     "OpenSpecimen record and %s left unchanged. Review %s on ",
+                     "the Linking tab."),
+              n_conflicted,
+              if (n_conflicted == 1L) " is" else "s are",
+              if (n_conflicted == 1L) "was" else "were",
+              if (n_conflicted == 1L) "it" else "them"
+            ),
+            type = "warning", duration = 12
+          )
         }
 
         showNotification(

@@ -276,6 +276,9 @@ insert_new_links <- function(conn, links) {
     "),
     error = function(e) tibble::tibble()
   )
+
+  conflicts <- links_confirmed_empty()
+
   if (nrow(existing) > 0) {
     existing_keys <- .add_logical_link_key(existing) |>
       dplyr::select(.axis_lab_key, .axis_isolate_key, .axis_os_key)
@@ -286,12 +289,132 @@ insert_new_links <- function(conn, links) {
         by = c(".axis_lab_key", ".axis_isolate_key", ".axis_os_key")
       ) |>
       dplyr::select(-dplyr::starts_with(".axis_"))
+
+    # An isolate already linked to a *different* OpenSpecimen record is a
+    # conflict, not a duplicate. Appending it would leave one Vitek isolate
+    # linked to two specimens and silently duplicate it in the cleaned export,
+    # so it is withheld and reported for the caller to surface. The analyst
+    # resolves it by retracting the existing link first.
+    isolate_keys <- .add_logical_link_key(existing) |>
+      dplyr::distinct(.axis_lab_key, .axis_isolate_key)
+
+    flagged <- .add_logical_link_key(new_links) |>
+      dplyr::semi_join(isolate_keys, by = c(".axis_lab_key", ".axis_isolate_key"))
+
+    if (nrow(flagged) > 0) {
+      conflicts <- flagged |> dplyr::select(-dplyr::starts_with(".axis_"))
+      new_links <- .add_logical_link_key(new_links) |>
+        dplyr::anti_join(isolate_keys, by = c(".axis_lab_key", ".axis_isolate_key")) |>
+        dplyr::select(-dplyr::starts_with(".axis_"))
+    }
   }
 
-  if (nrow(new_links) == 0) return(new_links)
+  if (nrow(new_links) == 0) return(.with_conflicts(new_links, conflicts))
 
   .append_table_aligned(conn, "links_confirmed", new_links)
-  new_links
+  .with_conflicts(new_links, conflicts)
+}
+
+#' Attach withheld conflicting rows to an inserted-links result.
+#'
+#' Carried as an attribute so every existing caller that only counts rows or
+#' binds them into app_state keeps working unchanged.
+.with_conflicts <- function(inserted, conflicts) {
+  attr(inserted, "axis_conflicts") <- conflicts
+  inserted
+}
+
+#' Conflicting rows withheld by the last insert_new_links() call.
+link_insert_conflicts <- function(inserted) {
+  out <- attr(inserted, "axis_conflicts")
+  if (is.null(out)) links_confirmed_empty() else out
+}
+
+#' Retract confirmed links so an isolate can be linked again.
+#'
+#' A mis-clicked manual confirmation has to be undoable, and it has to be
+#' undoable in a way that lets the same pairing be confirmed again later. The
+#' row is therefore deleted from links_confirmed rather than flagged: a flagged
+#' row would still satisfy the duplicate check in insert_new_links() and would
+#' silently refuse a corrected re-confirmation. History lives in edit_log, which
+#' is the audit table, and any field overrides attached to the dead link_id are
+#' removed with it so they cannot reattach to a later link.
+#'
+#' @param conn      DBI connection from open_db().
+#' @param link_ids  Character vector of link_id values to retract.
+#' @param who       Analyst identity recorded in the audit entry.
+#' @param rationale Free-text reason, stored in the audit entry.
+#' @return list(n_retracted, retracted, audit)
+retract_links <- function(conn, link_ids, who = "analyst", rationale = "") {
+  link_ids <- unique(stats::na.omit(as.character(link_ids)))
+  empty <- list(
+    n_retracted = 0L,
+    retracted   = links_confirmed_empty(),
+    audit       = edit_log_empty()
+  )
+  if (length(link_ids) == 0) return(empty)
+
+  DBI::dbWithTransaction(conn, {
+    doomed <- tryCatch(
+      DBI::dbGetQuery(
+        conn,
+        sprintf(
+          "SELECT * FROM links_confirmed WHERE link_id IN (%s)",
+          paste(DBI::dbQuoteString(conn, link_ids), collapse = ", ")
+        )
+      ),
+      error = function(e) tibble::tibble()
+    )
+    if (nrow(doomed) == 0) return(empty)
+
+    doomed <- tibble::as_tibble(doomed)
+    now_ts <- lubridate::now(tzone = "UTC")
+
+    audit <- tibble::tibble(
+      event_id   = purrr::map_chr(seq_len(nrow(doomed)), ~ uuid::UUIDgenerate()),
+      link_id    = as.character(doomed$link_id),
+      event_type = "link.retracted",
+      field      = "os_identifier",
+      from_value = as.character(doomed$os_identifier),
+      to_value   = NA_character_,
+      who        = as.character(who),
+      when_ts    = now_ts
+    )
+    if (nzchar(rationale)) audit$to_value <- paste0("retracted: ", rationale)
+
+    quoted <- paste(DBI::dbQuoteString(conn, link_ids), collapse = ", ")
+    DBI::dbExecute(conn, sprintf(
+      "DELETE FROM links_confirmed WHERE link_id IN (%s)", quoted
+    ))
+    DBI::dbExecute(conn, sprintf(
+      "DELETE FROM cleaned_overrides WHERE link_id IN (%s)", quoted
+    ))
+    # The cleaned_* tables are export snapshots rebuilt wholesale on the next
+    # "Rebuild and export", but the Inventory tab reads them directly, so the
+    # retracted isolate is dropped now rather than lingering in a chart until
+    # the next export. They may not exist yet on a fresh database.
+    for (tbl in c("cleaned_links", "cleaned_ast")) {
+      tryCatch(
+        DBI::dbExecute(conn, sprintf(
+          "DELETE FROM %s WHERE link_id IN (%s)", tbl, quoted
+        )),
+        error = function(e) invisible(NULL)
+      )
+    }
+
+    .append_table_aligned(conn, "edit_log", audit)
+
+    list(n_retracted = nrow(doomed), retracted = doomed, audit = audit)
+  })
+}
+
+#' Empty edit_log tibble with the canonical column types.
+edit_log_empty <- function() {
+  tibble::tibble(
+    event_id = character(), link_id = character(), event_type = character(),
+    field = character(), from_value = character(), to_value = character(),
+    who = character(), when_ts = lubridate::ymd_hms(character())
+  )
 }
 
 #' Write matched links to links_confirmed (append, skip duplicate logical links).
@@ -656,10 +779,14 @@ confirm_links <- function(conn, matched, batch_id,
     }
   })
 
+  conflicts <- link_insert_conflicts(inserted)
+
   list(
-    n_committed = nrow(inserted),
-    inserted    = inserted,
-    audit       = audit
+    n_committed  = nrow(inserted),
+    inserted     = inserted,
+    audit        = audit,
+    n_conflicted = nrow(conflicts),
+    conflicted   = conflicts
   )
 }
 
