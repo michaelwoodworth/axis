@@ -88,3 +88,41 @@ an isolate that defect 2 had put back in the queue.
 tests in `test-linking-workflow.R`, all on synthetic records. They cover the
 round trip that matters: confirm, re-run automerge, retract, re-run again, and
 confirm the corrected specimen.
+
+## Follow-up: the Remove link button did nothing (2026-09)
+
+The action shipped above was unreachable. Cedar reported the dialog opening and
+the confirm button doing nothing at all — no change, no error, no notification.
+
+**One click was arriving as two events.** `btn_unlink` was a raw `tags$button`
+carrying *both* the `action-button` class and an inline
+`onclick="Shiny.setInputValue(...)"`. Shiny's own ActionButton binding fires on
+the class, and the inline handler fires as well, so `observeEvent(input$btn_unlink)`
+ran twice and called `showModal()` twice in one flush. Shiny's modal wrapper
+holds one dialog: the first landed inside `#shiny-modal-wrapper` and was bound,
+the second was appended loose in the body, unbound, and stacked on top. The
+dialog the analyst saw and clicked had no Shiny binding, so the click went
+nowhere. Reproduced in Chromium against a seeded database:
+
+```
+[{i:0, bound:true,  chain: BUTTON#linking-btn_unlink_confirm < … < DIV#shiny-modal-wrapper},
+ {i:1, bound:false, chain: BUTTON#linking-btn_unlink_confirm < … < (body)}]
+.modal count: 2
+```
+
+`btn_save` and `btn_revert` carried the same double mechanism. Nobody noticed
+because their handlers are effectively idempotent — but Save appends to
+`cleaned_overrides` and the edit log, so it was writing each edit twice.
+
+**Fixed** by dropping the inline `onclick` from all three and relying on the
+`action-button` class alone, which is what `run_match` and `rerun_match` in the
+ingestion module already do. Verified in the browser: one modal, one bound
+button, and the link removed from `links_confirmed` on disk with a
+`link.retracted` row in `edit_log`. Repeat removals work, so re-rendering the
+detail rail does not lose the binding.
+
+The button row is now `link_action_buttons()`, a pure function, so the markup
+can be asserted without the reactive machinery.
+`tests/testthat/test-linking-workflow.R` fails if any detail-rail button
+regains both mechanisms — confirmed by reintroducing the `onclick` and watching
+the suite go red.

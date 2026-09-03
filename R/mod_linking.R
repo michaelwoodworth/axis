@@ -1407,44 +1407,7 @@ linkingServer <- function(id, app_state) {
           )
         },
 
-        # Save / Discard buttons (only in edit mode). "Discard edits" is named
-        # for what it does: it clears unsaved field edits in this panel. It has
-        # never removed a confirmed link, and the old "Revert" label read as a
-        # promise that it would.
-        if (isTRUE(isolate(input$edit_mode)) && !startsWith(lid, "staged::")) {
-          shiny::div(
-            class = "lk-action-row",
-            shiny::tags$button(
-              id      = ns("btn_save"),
-              class   = "lk-btn-save action-button",
-              onclick = sprintf("Shiny.setInputValue('%s', Math.random())", ns("btn_save")),
-              "Save changes"
-            ),
-            shiny::tags$button(
-              id      = ns("btn_revert"),
-              class   = "lk-btn-revert action-button",
-              title   = "Clear unsaved field edits in this panel. Does not remove the link.",
-              onclick = sprintf("Shiny.setInputValue('%s', Math.random())", ns("btn_revert")),
-              "Discard edits"
-            )
-          )
-        },
-
-        # Remove link. A manual confirmation of the wrong OpenSpecimen record
-        # has to be undoable, and the undo has to be reachable from the link
-        # itself rather than hidden behind edit mode.
-        if (!startsWith(lid, "staged::")) {
-          shiny::div(
-            class = "lk-action-row",
-            shiny::tags$button(
-              id      = ns("btn_unlink"),
-              class   = "lk-btn-unlink action-button",
-              title   = "Remove this confirmed link and return the isolate to the review queue.",
-              onclick = sprintf("Shiny.setInputValue('%s', Math.random())", ns("btn_unlink")),
-              "Remove link…"
-            )
-          )
-        },
+        link_action_buttons(ns, lid, isTRUE(isolate(input$edit_mode))),
 
         # Audit timeline
         shiny::div(
@@ -1827,4 +1790,63 @@ staged_links_display <- function(app_state) {
     ) |>
     dplyr::group_by(lab_id, isolate_number, os_identifier) |>
     dplyr::summarise(disputed = any(disputed), .groups = "drop")
+}
+
+# ── Detail-rail action buttons ────────────────────────────────────────────────
+
+#' Build the action buttons shown under a selected link in the detail rail.
+#'
+#' Extracted from the detail rail so the rendered markup can be asserted
+#' directly. A raw button that carries BOTH the `action-button` class and an
+#' inline `Shiny.setInputValue` onclick sends two events for a single click:
+#' Shiny's own binding fires, and so does the inline handler. For an idempotent
+#' observer that is invisible, but `btn_unlink` calls showModal(), and two
+#' showModal() calls in one flush leave a second dialog stacked on top of the
+#' live one with none of its inputs bound — so the visible "Remove link" button
+#' does nothing at all. Use the class alone; it is what the rest of the app does.
+#'
+#' @param ns Module namespace function.
+#' @param lid Selected link id. A "staged::" id is a candidate, not a link, so
+#'   it gets no buttons.
+#' @param edit_mode Logical. Save/Discard appear only in edit mode.
+#' @return A shiny tagList, possibly empty.
+link_action_buttons <- function(ns, lid, edit_mode = FALSE) {
+  if (is.null(lid) || !nzchar(lid) || startsWith(lid, "staged::")) {
+    return(shiny::tagList())
+  }
+
+  shiny::tagList(
+    # "Discard edits" is named for what it does: it clears unsaved field edits
+    # in this panel. It has never removed a confirmed link, and the old
+    # "Revert" label read as a promise that it would.
+    if (isTRUE(edit_mode)) {
+      shiny::div(
+        class = "lk-action-row",
+        shiny::tags$button(
+          id = ns("btn_save"), type = "button",
+          class = "lk-btn-save action-button",
+          "Save changes"
+        ),
+        shiny::tags$button(
+          id = ns("btn_revert"), type = "button",
+          class = "lk-btn-revert action-button",
+          title = "Clear unsaved field edits in this panel. Does not remove the link.",
+          "Discard edits"
+        )
+      )
+    },
+
+    # A manual confirmation of the wrong OpenSpecimen record has to be
+    # undoable, and the undo has to be reachable from the link itself rather
+    # than hidden behind edit mode.
+    shiny::div(
+      class = "lk-action-row",
+      shiny::tags$button(
+        id = ns("btn_unlink"), type = "button",
+        class = "lk-btn-unlink action-button",
+        title = "Remove this confirmed link and return the isolate to the review queue.",
+        "Remove link\u2026"
+      )
+    )
+  )
 }

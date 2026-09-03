@@ -299,3 +299,66 @@ test_that("the discarded field edits path still only clears pending edits", {
     expect_equal(nrow(app_state$links_confirmed), before)
   })
 })
+
+# ── One click must produce exactly one Shiny event ───────────────────────────
+# A raw tags$button carrying BOTH the action-button class and an inline
+# Shiny.setInputValue onclick sends two events for one click. For an idempotent
+# handler that is invisible; for one that calls showModal() it opens two
+# dialogs, and only the first is bound, so the visible confirm button is inert.
+# That is exactly how the remove-link action failed in the field.
+
+.lk_ns <- function(id) paste0("linking-", id)
+
+.lk_button_tags <- function(html) {
+  regmatches(html, gregexpr("<button[^>]*>", html))[[1]]
+}
+
+test_that("no detail-rail button carries both an action-button class and an onclick", {
+  for (edit_mode in c(FALSE, TRUE)) {
+    html <- as.character(link_action_buttons(.lk_ns, "L-1", edit_mode))
+    offenders <- Filter(
+      function(tag) grepl("action-button", tag, fixed = TRUE) &&
+                    grepl("onclick=", tag, fixed = TRUE),
+      .lk_button_tags(html)
+    )
+    expect_equal(
+      as.character(offenders), character(),
+      info = sprintf("edit_mode = %s: these buttons fire twice per click", edit_mode)
+    )
+  }
+})
+
+test_that("the remove-link button is present outside edit mode and bound once", {
+  html <- as.character(link_action_buttons(.lk_ns, "L-1", edit_mode = FALSE))
+  tags <- .lk_button_tags(html)
+
+  unlink_tags <- Filter(function(t) grepl('id="linking-btn_unlink"', t, fixed = TRUE), tags)
+  expect_length(unlink_tags, 1L)
+  expect_true(grepl("action-button", unlink_tags[[1]], fixed = TRUE))
+  expect_false(grepl("onclick=", unlink_tags[[1]], fixed = TRUE))
+  expect_match(html, "Remove link")
+
+  # Save and Discard belong to edit mode only.
+  expect_false(grepl('id="linking-btn_save"', html, fixed = TRUE))
+})
+
+test_that("edit mode adds save and discard, still one binding each", {
+  html <- as.character(link_action_buttons(.lk_ns, "L-1", edit_mode = TRUE))
+  tags <- .lk_button_tags(html)
+
+  for (id in c("linking-btn_save", "linking-btn_revert", "linking-btn_unlink")) {
+    hits <- Filter(function(t) grepl(sprintf('id="%s"', id), t, fixed = TRUE), tags)
+    expect_length(hits, 1L)
+    expect_false(grepl("onclick=", hits[[1]], fixed = TRUE))
+  }
+  expect_match(html, "Discard edits", fixed = TRUE)
+  # The old label promised something the button never did.
+  expect_false(grepl(">Revert<", html, fixed = TRUE))
+})
+
+test_that("a staged candidate gets no action buttons", {
+  expect_equal(.lk_button_tags(as.character(link_action_buttons(.lk_ns, "staged::abc", TRUE))),
+               character())
+  expect_equal(.lk_button_tags(as.character(link_action_buttons(.lk_ns, NULL, TRUE))),
+               character())
+})
