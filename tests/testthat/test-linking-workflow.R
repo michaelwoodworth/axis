@@ -299,3 +299,173 @@ test_that("the discarded field edits path still only clears pending edits", {
     expect_equal(nrow(app_state$links_confirmed), before)
   })
 })
+
+# ── One click must produce exactly one Shiny event ───────────────────────────
+# A raw tags$button carrying BOTH the action-button class and an inline
+# Shiny.setInputValue onclick sends two events for one click. For an idempotent
+# handler that is invisible; for one that calls showModal() it opens two
+# dialogs, and only the first is bound, so the visible confirm button is inert.
+# That is exactly how the remove-link action failed in the field.
+
+.lk_ns <- function(id) paste0("linking-", id)
+
+.lk_button_tags <- function(html) {
+  regmatches(html, gregexpr("<button[^>]*>", html))[[1]]
+}
+
+test_that("no detail-rail button carries both an action-button class and an onclick", {
+  for (edit_mode in c(FALSE, TRUE)) {
+    html <- as.character(link_action_buttons(.lk_ns, "L-1", edit_mode))
+    offenders <- Filter(
+      function(tag) grepl("action-button", tag, fixed = TRUE) &&
+                    grepl("onclick=", tag, fixed = TRUE),
+      .lk_button_tags(html)
+    )
+    expect_equal(
+      as.character(offenders), character(),
+      info = sprintf("edit_mode = %s: these buttons fire twice per click", edit_mode)
+    )
+  }
+})
+
+test_that("the remove-link button is present outside edit mode and bound once", {
+  html <- as.character(link_action_buttons(.lk_ns, "L-1", edit_mode = FALSE))
+  tags <- .lk_button_tags(html)
+
+  unlink_tags <- Filter(function(t) grepl('id="linking-btn_unlink"', t, fixed = TRUE), tags)
+  expect_length(unlink_tags, 1L)
+  expect_true(grepl("action-button", unlink_tags[[1]], fixed = TRUE))
+  expect_false(grepl("onclick=", unlink_tags[[1]], fixed = TRUE))
+  expect_match(html, "Remove link")
+
+  # Save and Discard belong to edit mode only.
+  expect_false(grepl('id="linking-btn_save"', html, fixed = TRUE))
+})
+
+test_that("edit mode adds save and discard, still one binding each", {
+  html <- as.character(link_action_buttons(.lk_ns, "L-1", edit_mode = TRUE))
+  tags <- .lk_button_tags(html)
+
+  for (id in c("linking-btn_save", "linking-btn_revert", "linking-btn_unlink")) {
+    hits <- Filter(function(t) grepl(sprintf('id="%s"', id), t, fixed = TRUE), tags)
+    expect_length(hits, 1L)
+    expect_false(grepl("onclick=", hits[[1]], fixed = TRUE))
+  }
+  expect_match(html, "Discard edits", fixed = TRUE)
+  # The old label promised something the button never did.
+  expect_false(grepl(">Revert<", html, fixed = TRUE))
+})
+
+test_that("a staged candidate gets no action buttons", {
+  expect_equal(.lk_button_tags(as.character(link_action_buttons(.lk_ns, "staged::abc", TRUE))),
+               character())
+  expect_equal(.lk_button_tags(as.character(link_action_buttons(.lk_ns, NULL, TRUE))),
+               character())
+})
+
+# ── Manual link reaches needs-review isolates ────────────────────────────────
+# A needs-review isolate is one AXIS proposed candidates for without being sure
+# any is right. When none of them is right the analyst has to be able to name
+# the correct OpenSpecimen record; offering only no-match isolates left those
+# isolates with no way forward at all.
+
+.lk_buckets <- function(none_ids = "SYN004CRE1of1", review_ids = "SYN003CRE1of1") {
+  mk <- function(ids) {
+    if (length(ids) == 0) return(tibble::tibble())
+    tibble::tibble(lab_id = ids, isolate_number = "1")
+  }
+  list(matched = tibble::tibble(), review = mk(review_ids), none = mk(none_ids))
+}
+
+test_that("manual link offers both no-match and needs-review isolates", {
+  choices <- manual_link_vitek_choices(.lk_buckets())
+
+  expect_setequal(unname(choices),
+                  c("SYN003CRE1of1||1", "SYN004CRE1of1||1"))
+  expect_true(any(grepl("needs review", names(choices), fixed = TRUE)))
+  expect_true(any(grepl("no match", names(choices), fixed = TRUE)))
+})
+
+test_that("each isolate is offered once even when the review bucket repeats it", {
+  # bucket_results()$review holds one row per candidate, so an isolate with
+  # several candidates appears several times.
+  buckets <- list(
+    matched = tibble::tibble(),
+    review = tibble::tibble(lab_id = rep("SYN003CRE1of1", 4L), isolate_number = "1"),
+    none = tibble::tibble()
+  )
+  choices <- manual_link_vitek_choices(buckets)
+
+  expect_length(choices, 1L)
+  expect_equal(unname(choices), "SYN003CRE1of1||1")
+})
+
+test_that("an isolate is labelled no match when it somehow sits in both buckets", {
+  choices <- manual_link_vitek_choices(
+    .lk_buckets(none_ids = "SYN003CRE1of1", review_ids = "SYN003CRE1of1")
+  )
+  expect_length(choices, 1L)
+  expect_match(names(choices), "no match", fixed = TRUE)
+})
+
+test_that("manual link choices are empty when nothing is unlinked", {
+  expect_length(manual_link_vitek_choices(NULL), 0L)
+  expect_length(manual_link_vitek_choices(.lk_buckets(character(), character())), 0L)
+  expect_length(
+    manual_link_vitek_choices(list(matched = tibble::tibble(a = 1))), 0L
+  )
+})
+
+test_that("the selected row preselects only when it is an unlinked candidate", {
+  choices <- manual_link_vitek_choices(.lk_buckets())
+  links <- tibble::tibble(
+    link_id = c("staged::a", "staged::b", "L-confirmed"),
+    lab_id = c("SYN003CRE1of1", "SYN001CRE1of1", "SYN004CRE1of1"),
+    isolate_number = "1"
+  )
+
+  # A staged needs-review row whose isolate is offered.
+  expect_equal(selected_unlinked_key("staged::a", links, choices), "SYN003CRE1of1||1")
+  # A staged row whose isolate is already linked, so not in the dropdown.
+  expect_null(selected_unlinked_key("staged::b", links, choices))
+  # A confirmed link: changing it means removing it first.
+  expect_null(selected_unlinked_key("L-confirmed", links, choices))
+  expect_null(selected_unlinked_key(NULL, links, choices))
+  expect_null(selected_unlinked_key("staged::zzz", links, choices))
+})
+
+test_that("a needs-review isolate can be manually linked end to end", {
+  fx <- .lk_fixture()
+  conn <- open_db(tempfile(fileext = ".duckdb"))
+  withr::defer(close_db(conn))
+  persist_source_batch(conn, "B-lk", fx$vitek_raw, fx$vitek_ast, fx$specimens)
+  app_state <- .lk_state(fx, conn)
+
+  review_isolate <- fx$candidates$lab_id[[3]]
+
+  shiny::testServer(linkingServer, args = list(app_state = app_state), {
+    session$setInputs(manual_link = 1)
+    # The isolate AXIS was unsure about is selectable, and the analyst points
+    # it at a record that was never among its candidates.
+    session$setInputs(
+      manual_vitek_key = paste0(review_isolate, "||1"),
+      manual_os_identifier = "OS-001",
+      manual_link_reason = "correct record was not offered as a candidate",
+      save_manual_link = 1
+    )
+
+    linked <- app_state$links_confirmed
+    expect_true(review_isolate %in% linked$lab_id)
+    row <- linked[linked$lab_id == review_isolate, ]
+    expect_equal(row$os_identifier[[1]], "OS-001")
+    expect_equal(row$match_method[[1]], "manual_selected")
+
+    # And it leaves the review queue rather than sitting there confirmed.
+    expect_false(review_isolate %in% app_state$match_buckets$review$lab_id)
+  })
+
+  audit <- tibble::as_tibble(read_table(conn, "edit_log")) |>
+    dplyr::filter(event_type == "link.manually_confirmed")
+  expect_gte(nrow(audit), 1L)
+  expect_true(any(grepl("not offered as a candidate", audit$to_value, fixed = TRUE)))
+})

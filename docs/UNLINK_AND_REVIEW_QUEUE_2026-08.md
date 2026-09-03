@@ -88,3 +88,78 @@ an isolate that defect 2 had put back in the queue.
 tests in `test-linking-workflow.R`, all on synthetic records. They cover the
 round trip that matters: confirm, re-run automerge, retract, re-run again, and
 confirm the corrected specimen.
+
+## Follow-up: the Remove link button did nothing (2026-09)
+
+The action shipped above was unreachable. Cedar reported the dialog opening and
+the confirm button doing nothing at all — no change, no error, no notification.
+
+**One click was arriving as two events.** `btn_unlink` was a raw `tags$button`
+carrying *both* the `action-button` class and an inline
+`onclick="Shiny.setInputValue(...)"`. Shiny's own ActionButton binding fires on
+the class, and the inline handler fires as well, so `observeEvent(input$btn_unlink)`
+ran twice and called `showModal()` twice in one flush. Shiny's modal wrapper
+holds one dialog: the first landed inside `#shiny-modal-wrapper` and was bound,
+the second was appended loose in the body, unbound, and stacked on top. The
+dialog the analyst saw and clicked had no Shiny binding, so the click went
+nowhere. Reproduced in Chromium against a seeded database:
+
+```
+[{i:0, bound:true,  chain: BUTTON#linking-btn_unlink_confirm < … < DIV#shiny-modal-wrapper},
+ {i:1, bound:false, chain: BUTTON#linking-btn_unlink_confirm < … < (body)}]
+.modal count: 2
+```
+
+`btn_save` and `btn_revert` carried the same double mechanism. Nobody noticed
+because their handlers are effectively idempotent — but Save appends to
+`cleaned_overrides` and the edit log, so it was writing each edit twice.
+
+**Fixed** by dropping the inline `onclick` from all three and relying on the
+`action-button` class alone, which is what `run_match` and `rerun_match` in the
+ingestion module already do. Verified in the browser: one modal, one bound
+button, and the link removed from `links_confirmed` on disk with a
+`link.retracted` row in `edit_log`. Repeat removals work, so re-rendering the
+detail rail does not lose the binding.
+
+The button row is now `link_action_buttons()`, a pure function, so the markup
+can be asserted without the reactive machinery.
+`tests/testthat/test-linking-workflow.R` fails if any detail-rail button
+regains both mechanisms — confirmed by reintroducing the `onclick` and watching
+the suite go red.
+
+## Manual link now reaches needs-review isolates (2026-09)
+
+Cedar asked for a way to move a record from Needs Review to No Match. The
+underlying need is narrower than that: some needs-review isolates have no
+correct OpenSpecimen record among their candidates, and the only tool for
+naming an arbitrary record — **Manual link…** — populated its Vitek dropdown
+from `buckets$none` alone. A needs-review isolate could not be selected in it
+at all. So those isolates had no way forward: the wrong candidate could not be
+confirmed, and the right record could not be chosen. Moving the row to No Match
+was a workaround for that gap.
+
+`manual_link_vitek_choices()` now draws from both unlinked buckets and tags
+each isolate with the one it came from:
+
+```
+SYN003igCRE1of1 · isolate 1 · needs review
+SYN005igCRE1of1 · isolate 1 · no match
+```
+
+The review bucket holds one row per candidate, so it is collapsed to one entry
+per isolate first. The field is relabelled "Unlinked Vitek record (no match or
+needs review)". Confirming still goes through the same audited
+`manual_selected` path, and the isolate leaves the review queue afterwards, so
+the queue drains exactly as it would have under the move-then-link workaround —
+without the intermediate step or a bucket mutation to keep consistent.
+
+`selected_unlinked_key()` preselects the isolate of the currently selected row
+when that row is a staged candidate the dialog can act on. A confirmed link is
+deliberately not preselected: changing one means removing it first, and
+preselecting it would invite the conflict the guard above exists to prevent.
+
+Verified in Chromium against a synthetic batch of 6 isolates (2 auto-matched,
+2 needs-review, 2 no-match): the dropdown lists all four unlinked isolates with
+the right tags, and a needs-review isolate was linked to a record that was
+never one of its candidates, landing in `links_confirmed` as `manual_selected`
+with the reason in `edit_log`.
