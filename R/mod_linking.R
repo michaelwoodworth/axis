@@ -150,6 +150,77 @@ manual_link_os_choices <- function(specimens) {
   stats::setNames(as.character(choices$os_identifier), labels)
 }
 
+#' Vitek isolates a manual link may be created for.
+#'
+#' Both unlinked buckets, not just no-match. A needs-review isolate is one where
+#' AXIS proposed candidates but is not certain any is right; if none of them is,
+#' the analyst has to be able to point at the correct OpenSpecimen record
+#' directly. Offering only no-match isolates left those isolates with no way
+#' forward at all — the wrong candidate could not be confirmed, and the right
+#' record could not be chosen.
+#'
+#' Each isolate appears once, tagged with the bucket it came from, so an analyst
+#' can see that they are overriding a proposed match rather than filling a gap.
+#' The review bucket holds one row per candidate, so it is collapsed first.
+#'
+#' @param buckets Result of bucket_results(), or NULL.
+#' @return Named character vector: names are the labels shown, values are
+#'   "lab_id||isolate_number" keys.
+manual_link_vitek_choices <- function(buckets) {
+  empty <- stats::setNames(character(), character())
+  if (is.null(buckets)) return(empty)
+
+  take <- function(bucket, label) {
+    d <- buckets[[bucket]]
+    if (is.null(d) || nrow(d) == 0L) return(NULL)
+    if (length(setdiff(c("lab_id", "isolate_number"), names(d))) > 0) return(NULL)
+    d |>
+      dplyr::distinct(lab_id, isolate_number) |>
+      dplyr::mutate(.axis_bucket = label)
+  }
+
+  rows <- dplyr::bind_rows(take("none", "no match"), take("review", "needs review"))
+  if (is.null(rows) || nrow(rows) == 0L) return(empty)
+
+  # An isolate in both buckets cannot happen, but if it ever did, the no-match
+  # label is the safer thing to show: it claims less.
+  rows <- rows |>
+    dplyr::filter(!is.na(lab_id), nzchar(as.character(lab_id))) |>
+    dplyr::distinct(lab_id, isolate_number, .keep_all = TRUE) |>
+    dplyr::arrange(lab_id, isolate_number)
+
+  stats::setNames(
+    paste(rows$lab_id, rows$isolate_number, sep = "||"),
+    sprintf("%s \u00b7 isolate %s \u00b7 %s",
+            rows$lab_id, rows$isolate_number, rows$.axis_bucket)
+  )
+}
+
+#' The Manual Link key for the currently selected row, when it is unlinked.
+#'
+#' Returns NULL unless the selection is a staged (unconfirmed) row whose isolate
+#' is one the Manual Link dialog can act on. A confirmed link is not eligible:
+#' changing it means removing the existing link first, so silently preselecting
+#' it would invite a conflict the analyst did not intend.
+#'
+#' @param selected_id rv$selected_id.
+#' @param links Display table from links_data().
+#' @param choices Output of manual_link_vitek_choices().
+#' @return Single key string, or NULL.
+selected_unlinked_key <- function(selected_id, links, choices) {
+  if (is.null(selected_id) || !nzchar(selected_id)) return(NULL)
+  if (!startsWith(selected_id, "staged::")) return(NULL)
+  if (is.null(links) || nrow(links) == 0L) return(NULL)
+  if (length(setdiff(c("link_id", "lab_id", "isolate_number"), names(links))) > 0) return(NULL)
+
+  row <- links[links$link_id == selected_id, , drop = FALSE]
+  if (nrow(row) == 0L) return(NULL)
+
+  key <- paste(row$lab_id[[1]], row$isolate_number[[1]], sep = "||")
+  if (!key %in% choices) return(NULL)
+  key
+}
+
 #' Count eligible Manual Link targets per collection protocol.
 #'
 #' Shown in the Manual Link dialog so an analyst can see at a glance which
@@ -572,10 +643,12 @@ linkingServer <- function(id, app_state) {
 
     shiny::observeEvent(input$manual_link, {
       buckets <- app_state$match_buckets
-      no_match <- if (!is.null(buckets)) buckets$none else NULL
       specimens <- app_state$specimens
-      if (is.null(no_match) || nrow(no_match) == 0L) {
-        shiny::showNotification("There are no current no-match Vitek records.", type = "message")
+      vitek_choices <- manual_link_vitek_choices(buckets)
+      if (length(vitek_choices) == 0L) {
+        shiny::showNotification(
+          "There are no unlinked Vitek records to link.", type = "message"
+        )
         return()
       }
       if (is.null(specimens) || nrow(specimens) == 0L) {
@@ -583,10 +656,11 @@ linkingServer <- function(id, app_state) {
         return()
       }
 
-      vitek_choices <- stats::setNames(
-        paste(no_match$lab_id, no_match$isolate_number, sep = "||"),
-        sprintf("%s · isolate %s", no_match$lab_id, no_match$isolate_number)
-      )
+      # If a row is selected in the table, start the dialog on that isolate.
+      # Hunting for it again in a dropdown of hundreds is where a mis-link
+      # comes from.
+      preselect <- selected_unlinked_key(rv$selected_id, links_data(), vitek_choices)
+
       os_options <- manual_link_os_choices(specimens)
       if (length(os_options) == 0L) {
         shiny::showNotification("No eligible OpenSpecimen match targets are loaded.", type = "warning")
@@ -603,7 +677,7 @@ linkingServer <- function(id, app_state) {
       shiny::showModal(shiny::modalDialog(
         title = "Create a manual Vitek–OpenSpecimen link",
         shiny::selectizeInput(
-          ns("manual_vitek_key"), "No-match Vitek record",
+          ns("manual_vitek_key"), "Unlinked Vitek record (no match or needs review)",
           choices = NULL,
           options = list(placeholder = "Type to search Vitek Lab IDs",
                          maxOptions = .LK_MAX_DROPDOWN_OPTIONS)
@@ -637,7 +711,7 @@ linkingServer <- function(id, app_state) {
 
       shiny::updateSelectizeInput(
         session, "manual_vitek_key",
-        choices = vitek_choices, server = TRUE
+        choices = vitek_choices, selected = preselect, server = TRUE
       )
       shiny::updateSelectizeInput(
         session, "manual_os_identifier",

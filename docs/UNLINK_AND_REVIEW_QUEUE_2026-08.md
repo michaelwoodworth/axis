@@ -126,3 +126,40 @@ can be asserted without the reactive machinery.
 `tests/testthat/test-linking-workflow.R` fails if any detail-rail button
 regains both mechanisms — confirmed by reintroducing the `onclick` and watching
 the suite go red.
+
+## Manual link now reaches needs-review isolates (2026-09)
+
+Cedar asked for a way to move a record from Needs Review to No Match. The
+underlying need is narrower than that: some needs-review isolates have no
+correct OpenSpecimen record among their candidates, and the only tool for
+naming an arbitrary record — **Manual link…** — populated its Vitek dropdown
+from `buckets$none` alone. A needs-review isolate could not be selected in it
+at all. So those isolates had no way forward: the wrong candidate could not be
+confirmed, and the right record could not be chosen. Moving the row to No Match
+was a workaround for that gap.
+
+`manual_link_vitek_choices()` now draws from both unlinked buckets and tags
+each isolate with the one it came from:
+
+```
+SYN003igCRE1of1 · isolate 1 · needs review
+SYN005igCRE1of1 · isolate 1 · no match
+```
+
+The review bucket holds one row per candidate, so it is collapsed to one entry
+per isolate first. The field is relabelled "Unlinked Vitek record (no match or
+needs review)". Confirming still goes through the same audited
+`manual_selected` path, and the isolate leaves the review queue afterwards, so
+the queue drains exactly as it would have under the move-then-link workaround —
+without the intermediate step or a bucket mutation to keep consistent.
+
+`selected_unlinked_key()` preselects the isolate of the currently selected row
+when that row is a staged candidate the dialog can act on. A confirmed link is
+deliberately not preselected: changing one means removing it first, and
+preselecting it would invite the conflict the guard above exists to prevent.
+
+Verified in Chromium against a synthetic batch of 6 isolates (2 auto-matched,
+2 needs-review, 2 no-match): the dropdown lists all four unlinked isolates with
+the right tags, and a needs-review isolate was linked to a record that was
+never one of its candidates, landing in `links_confirmed` as `manual_selected`
+with the reason in `edit_log`.
